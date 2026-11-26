@@ -58,6 +58,13 @@ async function hmacSign(secret, data) {
   return bytesToHex(await crypto.subtle.sign('HMAC', key, te.encode(data)));
 }
 
+function safeEqualHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 async function signToken(secret, username, hours) {
   const payload = b64url(JSON.stringify({ u: username, exp: Date.now() + hours * 3600 * 1000 }));
   return `${payload}.${await hmacSign(secret, payload)}`;
@@ -177,6 +184,37 @@ async function ensureDb(env) {
   return g.__mevpsInit;
 }
 
+/* --------- vps 表结构升级：SSH 连接参数模型（v2） --------- */
+async function migrateVps(db) {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = 'vps_schema_ver'").first();
+  const ver = row ? Number(row.value) || 0 : 0;
+  if (ver >= 2) return;
+  const info = await db.prepare('PRAGMA table_info(vps)').all();
+  const cols = new Set((info.results || []).map((c) => c.name));
+  const mark = () =>
+    db
+      .prepare("INSERT INTO settings (key, value) VALUES ('vps_schema_ver', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run();
+  if (!cols.has('ip')) {
+    // 全新安装或已是新结构：仅标版本
+    await mark();
+    return;
+  }
+  // 旧结构（ip/region/provider/price/expire_date）→ 重建为 SSH 模型，保留可用数据
+  await db
+    .prepare(
+      'CREATE TABLE vps_new (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, ssh_host TEXT NOT NULL, ssh_port INTEGER DEFAULT 22, ssh_username TEXT DEFAULT "root", ssh_auth TEXT DEFAULT "password", ssh_secret_enc TEXT DEFAULT "", country TEXT DEFAULT "", city TEXT DEFAULT "", spec TEXT DEFAULT "", online INTEGER DEFAULT -1, sync_status TEXT DEFAULT "idle", sync_error TEXT DEFAULT "", last_sync_at TEXT DEFAULT "", remark TEXT DEFAULT "", created_at TEXT, updated_at TEXT)'
+    )
+    .run();
+  await db
+    .prepare('INSERT INTO vps_new (id, name, ssh_host, spec, remark, created_at, updated_at) SELECT id, name, ip, spec, remark, created_at, updated_at FROM vps')
+    .run();
+  await db.prepare('DROP TABLE vps').run();
+  await db.prepare('ALTER TABLE vps_new RENAME TO vps').run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_vps_sync ON vps(sync_status)').run();
+  await mark();
+}
+
 async function initDb(env) {
   const db = env.db;
   if (!db) throw new Error('D1 绑定缺失');
@@ -184,11 +222,22 @@ async function initDb(env) {
   await db.batch([
     'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)',
     'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, salt TEXT NOT NULL, created_at TEXT, updated_at TEXT)',
-    'CREATE TABLE IF NOT EXISTS vps (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, ip TEXT NOT NULL, region TEXT DEFAULT \"\", spec TEXT DEFAULT \"\", provider TEXT DEFAULT \"\", status TEXT DEFAULT \"running\", price REAL DEFAULT 0, expire_date TEXT DEFAULT \"\", remark TEXT DEFAULT \"\", created_at TEXT, updated_at TEXT)',
+    'CREATE TABLE IF NOT EXISTS vps (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, ssh_host TEXT NOT NULL, ssh_port INTEGER DEFAULT 22, ssh_username TEXT DEFAULT "root", ssh_auth TEXT DEFAULT "password", ssh_secret_enc TEXT DEFAULT "", country TEXT DEFAULT "", city TEXT DEFAULT "", spec TEXT DEFAULT "", online INTEGER DEFAULT -1, sync_status TEXT DEFAULT "idle", sync_error TEXT DEFAULT "", last_sync_at TEXT DEFAULT "", remark TEXT DEFAULT "", created_at TEXT, updated_at TEXT)',
     'CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT DEFAULT \"\", action TEXT DEFAULT \"\", target TEXT DEFAULT \"\", detail TEXT DEFAULT \"\", ip TEXT DEFAULT \"\", status TEXT DEFAULT \"success\", created_at TEXT)',
     'CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at DESC)',
-    'CREATE INDEX IF NOT EXISTS idx_vps_status ON vps(status)',
+    'CREATE TABLE IF NOT EXISTS sync_jobs (id TEXT PRIMARY KEY, vps_id INTEGER, status TEXT DEFAULT "pending", created_at TEXT, updated_at TEXT)',
+    'CREATE INDEX IF NOT EXISTS idx_vps_sync ON vps(sync_status)',
+    'CREATE INDEX IF NOT EXISTS idx_jobs_vps ON sync_jobs(vps_id)',
   ].map((sql) => db.prepare(sql)));
+
+  // 旧库升级：region/provider/price/expire_date/ip → SSH 连接参数模型
+  await migrateVps(db);
+
+  // 回调签名密钥（幂等初始化，缺失则生成）
+  const cbRow = await db.prepare("SELECT value FROM settings WHERE key = 'sync_callback_secret'").first();
+  if (!cbRow) {
+    await db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').bind('sync_callback_secret', randomHex(32)).run();
+  }
 
   // 迁移：早期单一 gh_token_enc → 双 Token 槽（旧值并入 classic）
   const legacyToken = await db.prepare("SELECT value FROM settings WHERE key = 'gh_token_enc'").first();
@@ -225,18 +274,18 @@ async function initDb(env) {
 
     // ---- 演示数据（仅首次初始化写入，可在面板中自行修改/删除）----
     const demo = [
-      ['web-01', '192.0.2.11', '东京', '2C4G / 60G SSD', 'Vultr', 'running', 48, '2027-06-30', '官网 Web 节点'],
-      ['web-02', '192.0.2.12', '新加坡', '2C4G / 60G SSD', 'Vultr', 'running', 48, '2027-06-30', '官网备用节点'],
-      ['api-01', '198.51.100.21', '香港', '4C8G / 120G SSD', '阿里云', 'running', 168, '2027-03-15', '业务 API 服务器'],
-      ['db-01', '198.51.100.22', '香港', '4C16G / 240G SSD', '阿里云', 'maintenance', 299, '2027-03-15', '数据库主节点'],
-      ['dev-01', '203.0.113.31', '洛杉矶', '1C2G / 40G SSD', 'DigitalOcean', 'stopped', 35, '2027-01-20', '开发测试机'],
-      ['cdn-01', '203.0.113.32', '法兰克福', '2C2G / 50G SSD', 'Hetzner', 'running', 42, '2027-08-01', '欧洲边缘缓存'],
+      ['web-01', '192.0.2.11', 22, 'root', '官网 Web 节点'],
+      ['web-02', '192.0.2.12', 22, 'root', '官网备用节点'],
+      ['api-01', '198.51.100.21', 22, 'root', '业务 API 服务器'],
+      ['db-01', '198.51.100.22', 22, 'root', '数据库主节点'],
+      ['dev-01', '203.0.113.31', 22, 'ubuntu', '开发测试机'],
+      ['cdn-01', '203.0.113.32', 22, 'root', '欧洲边缘缓存'],
     ];
     const ins = db.prepare(
-      'INSERT INTO vps (name, ip, region, spec, provider, status, price, expire_date, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO vps (name, ssh_host, ssh_port, ssh_username, ssh_auth, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     );
     const t = nowStr();
-    await db.batch(demo.map((d) => ins.bind(...d, t, t)));
+    await db.batch(demo.map((d) => ins.bind(d[0], d[1], d[2], d[3], 'password', d[4], t, t)));
 
     const insLog = db.prepare(
       'INSERT INTO logs (username, action, target, detail, ip, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -273,6 +322,55 @@ async function authenticate(request, env) {
 
 /* ------------------------------ API 路由 ------------------------------ */
 
+/* ---------------------- GitHub Actions 执行器对接 ---------------------- */
+
+/* 取当前启用的 GitHub Token（解密）。classic 优先级由 gh_token_type 决定，缺失时回退。 */
+async function getActiveGhToken(env) {
+  const db = env.db;
+  const type = (await getSetting(db, 'gh_token_type', 'classic')) === 'fine' ? 'fine' : 'classic';
+  let enc = await getSetting(db, type === 'fine' ? 'gh_token_fine_enc' : 'gh_token_classic_enc', '');
+  if (!enc) enc = await getSetting(db, 'gh_token_classic_enc', '');
+  return await decSecret(env, enc);
+}
+
+async function createSyncJob(db, vpsId) {
+  const id = randomHex(16);
+  await db
+    .prepare('INSERT INTO sync_jobs (id, vps_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, vpsId, 'pending', nowStr(), nowStr())
+    .run();
+  return id;
+}
+
+/* repository_dispatch 触发 Actions。
+ * 安全约定：client_payload 只含 job_id / vps_id，绝不携带 SSH 凭据或任何密钥。 */
+async function dispatchSync(env, jobId, vpsId) {
+  const db = env.db;
+  const repo = await getSetting(db, 'gh_repo', '');
+  const eventType = await getSetting(db, 'gh_event', 'vps-sync');
+  const token = await getActiveGhToken(env);
+  if (!repo) return { ok: false, error: '未配置 GitHub 仓库，请到「SSH设置」填写' };
+  if (!token) return { ok: false, error: '未配置 GitHub Token，请到「SSH设置」填写' };
+  const [owner, name] = repo.split('/');
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${name}/dispatches`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: JSON.stringify({ event_type: eventType, client_payload: { job_id: jobId, vps_id: vpsId } }),
+    });
+    if (res.status === 204 || res.ok) return { ok: true };
+    const text = await res.text().catch(() => '');
+    return { ok: false, error: `GitHub 触发失败（${res.status}）${text.slice(0, 200)}` };
+  } catch (e) {
+    return { ok: false, error: `GitHub 调用异常: ${e && e.message ? e.message : e}` };
+  }
+}
+
 async function handleApi(request, env, url) {
   await ensureDb(env);
   const db = env.db;
@@ -307,6 +405,54 @@ async function handleApi(request, env, url) {
     return ok({ token, username, expiresIn: hours * 3600 });
   }
 
+  // —— 内部接口：Actions 执行器（HMAC 鉴权，非用户态）——
+  // 安全约定：SSH 凭据仅在 HMAC 签名校验通过后临时下发，用完即弃；
+  // dispatch payload 不含凭据，凭据与密钥均不落 GitHub。
+  if (path === '/api/internal/creds' || path === '/api/internal/result') {
+    const cbSecret = await getSetting(db, 'sync_callback_secret', '');
+    if (!cbSecret) return err('回调密钥未初始化', 500);
+    const sig = request.headers.get('X-MEVPS-Signature') || '';
+    const raw = await request.text();
+    const expect = await hmacSign(cbSecret, raw);
+    if (!sig || !safeEqualHex(sig, expect)) return err('签名校验失败', 401);
+    let payload;
+    try {
+      payload = JSON.parse(raw || '{}');
+    } catch {
+      return err('请求体不是合法 JSON');
+    }
+
+    if (path === '/api/internal/creds') {
+      const job = await db.prepare('SELECT * FROM sync_jobs WHERE id = ?').bind(String(payload.job_id || '')).first();
+      if (!job) return err('同步任务不存在', 404);
+      const v = await db.prepare('SELECT * FROM vps WHERE id = ?').bind(job.vps_id).first();
+      if (!v) return err('VPS 记录不存在', 404);
+      const secret = await decSecret(env, v.ssh_secret_enc || '');
+      return ok({ vps_id: v.id, host: v.ssh_host, port: v.ssh_port, username: v.ssh_username, auth: v.ssh_auth, secret });
+    }
+
+    // /api/internal/result：回写 配置 / 归属地 / 在线态
+    const job = await db.prepare('SELECT * FROM sync_jobs WHERE id = ?').bind(String(payload.job_id || '')).first();
+    if (!job) return err('同步任务不存在', 404);
+    const good = payload.ok !== false;
+    await db
+      .prepare('UPDATE vps SET country=?, city=?, spec=?, online=?, sync_status=?, sync_error=?, last_sync_at=?, updated_at=? WHERE id=?')
+      .bind(
+        String(payload.country || '').slice(0, 64),
+        String(payload.city || '').slice(0, 64),
+        String(payload.spec || '').slice(0, 300),
+        payload.online === true ? 1 : payload.online === false ? 0 : -1,
+        good ? 'ok' : 'error',
+        String(payload.error || '').slice(0, 300),
+        nowStr(),
+        nowStr(),
+        job.vps_id
+      )
+      .run();
+    await db.prepare('UPDATE sync_jobs SET status=?, updated_at=? WHERE id=?').bind(good ? 'done' : 'failed', nowStr(), job.id).run();
+    return ok({});
+  }
+
   // —— 以下接口均需登录 ——
   const username = await authenticate(request, env);
   if (!username) return err('登录已过期，请重新登录', 401);
@@ -322,43 +468,45 @@ async function handleApi(request, env, url) {
 
   // 仪表盘统计
   if (path === '/api/stats' && method === 'GET') {
-    const counts = await db
-      .prepare("SELECT status, COUNT(*) AS c, IFNULL(SUM(price),0) AS cost FROM vps GROUP BY status")
+    const totalRow = await db.prepare('SELECT COUNT(*) AS c FROM vps').first();
+    const onlineRow = await db.prepare('SELECT COUNT(*) AS c FROM vps WHERE online = 1').first();
+    const offlineRow = await db.prepare('SELECT COUNT(*) AS c FROM vps WHERE online = 0').first();
+    const total = totalRow ? totalRow.c : 0;
+    const online = onlineRow ? onlineRow.c : 0;
+    const offline = offlineRow ? offlineRow.c : 0;
+    const syncCounts = await db.prepare('SELECT sync_status, COUNT(*) AS c FROM vps GROUP BY sync_status').all();
+    const dist = (syncCounts.results || []).map((r) => ({ status: r.sync_status, count: r.c }));
+    // 近 7 天新增 VPS 趋势（替代原成本趋势）
+    const since = new Date(Date.now() - 6 * 86400000);
+    const sinceStr = `${since.getFullYear()}-${String(since.getMonth() + 1).padStart(2, '0')}-${String(since.getDate()).padStart(2, '0')}`;
+    const grouped = await db
+      .prepare('SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS c FROM vps WHERE created_at >= ? GROUP BY d')
+      .bind(sinceStr)
       .all();
-    let total = 0;
-    let monthly = 0;
-    const dist = [];
-    for (const row of counts.results || []) {
-      total += row.c;
-      monthly += row.cost;
-      dist.push({ status: row.status, count: row.c });
-    }
-    // 近 7 天成本趋势（按月费均摊 + 确定性小波动）
+    const byDay = {};
+    for (const r of grouped.results || []) byDay[r.d] = r.c;
     const trend = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date(Date.now() - i * 86400000);
-      const wave = 1 + Math.sin((d.getDate() + d.getMonth() * 30) * 1.7) * 0.06;
-      trend.push({
-        date: `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
-        cost: Math.round(((monthly / 30) * wave + Number.EPSILON) * 100) / 100,
-      });
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      trend.push({ date: `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`, count: byDay[key] || 0 });
     }
     const recent = await db
       .prepare('SELECT id, username, action, target, detail, status, created_at FROM logs ORDER BY id DESC LIMIT 8')
       .all();
-    const expireSoon = await db
-      .prepare("SELECT id, name, expire_date FROM vps WHERE expire_date != '' ORDER BY expire_date ASC LIMIT 5")
+    // 待同步 / 同步失败（替代原到期提醒）
+    const needSync = await db
+      .prepare("SELECT id, name, ssh_host, sync_status, sync_error FROM vps WHERE sync_status IN ('pending','running','error') ORDER BY updated_at DESC LIMIT 5")
       .all();
     return ok({
       total,
-      running: (counts.results || []).filter((r) => r.status === 'running').reduce((s, r) => s + r.c, 0),
-      stopped: (counts.results || []).filter((r) => r.status === 'stopped').reduce((s, r) => s + r.c, 0),
-      maintenance: (counts.results || []).filter((r) => r.status === 'maintenance').reduce((s, r) => s + r.c, 0),
-      monthlyCost: Math.round((monthly + Number.EPSILON) * 100) / 100,
+      online,
+      offline,
+      unknown: total - online - offline,
       trend,
       dist,
       recentLogs: recent.results || [],
-      expireSoon: expireSoon.results || [],
+      needSync: needSync.results || [],
       siteName: await getSetting(db, 'site_name', 'MEVPS'),
       version: API_VERSION,
     });
@@ -373,17 +521,20 @@ async function handleApi(request, env, url) {
     const where = [];
     const args = [];
     if (keyword) {
-      where.push('(name LIKE ? OR ip LIKE ? OR region LIKE ? OR remark LIKE ?)');
-      args.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+      where.push('(name LIKE ? OR ssh_host LIKE ? OR country LIKE ? OR city LIKE ? OR remark LIKE ?)');
+      args.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
     }
     if (status) {
-      where.push('status = ?');
+      where.push('sync_status = ?');
       args.push(status);
     }
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const totalRow = await db.prepare(`SELECT COUNT(*) AS c FROM vps ${clause}`).bind(...args).first();
+    // 安全列白名单：绝不回传 ssh_secret_enc
     const list = await db
-      .prepare(`SELECT * FROM vps ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .prepare(
+        `SELECT id, name, ssh_host, ssh_port, ssh_username, ssh_auth, country, city, spec, online, sync_status, sync_error, last_sync_at, remark, created_at, updated_at FROM vps ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`
+      )
       .bind(...args, pageSize, (page - 1) * pageSize)
       .all();
     return ok({ list: list.results || [], total: totalRow ? totalRow.c : 0, page, pageSize });
@@ -393,29 +544,22 @@ async function handleApi(request, env, url) {
   if (path === '/api/vps' && method === 'POST') {
     const b = await request.json().catch(() => ({}));
     const name = String(b.name || '').trim();
-    const ipAddr = String(b.ip || '').trim();
-    if (!name || !ipAddr) return err('名称和 IP 为必填项');
-    const status = ['running', 'stopped', 'maintenance'].includes(b.status) ? b.status : 'running';
+    const host = String(b.ssh_host || '').trim();
+    if (!name || !host) return err('名称和主机/IP 为必填项');
+    const port = Math.min(65535, Math.max(1, Number(b.ssh_port) || 22));
+    const user = String(b.ssh_username || 'root').trim().slice(0, 64);
+    const auth = b.ssh_auth === 'key' ? 'key' : 'password';
+    const secret = String(b.ssh_secret || '');
+    const secretEnc = secret ? await encSecret(env, secret) : '';
+    if (secret && !secretEnc) return err('SSH 凭据加密失败，请检查 SSH_ENC_KEY 配置');
     const t = nowStr();
     const r = await db
       .prepare(
-        'INSERT INTO vps (name, ip, region, spec, provider, status, price, expire_date, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO vps (name, ssh_host, ssh_port, ssh_username, ssh_auth, ssh_secret_enc, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      .bind(
-        name,
-        ipAddr,
-        String(b.region || ''),
-        String(b.spec || ''),
-        String(b.provider || ''),
-        status,
-        Number(b.price) || 0,
-        String(b.expire_date || ''),
-        String(b.remark || ''),
-        t,
-        t
-      )
+      .bind(name, host, port, user, auth, secretEnc, String(b.remark || '').slice(0, 500), t, t)
       .run();
-    await addLog(db, username, '新增', name, `创建 VPS 记录 ${name}（${ipAddr}）`, ip);
+    await addLog(db, username, '新增', name, `创建 VPS 记录 ${name}（${host}:${port}）`, ip);
     return ok({ id: r.meta.last_row_id });
   }
 
@@ -440,24 +584,25 @@ async function handleApi(request, env, url) {
     if (!row) return err('记录不存在', 404);
     if (method === 'PUT') {
       const b = await request.json().catch(() => ({}));
-      const status = ['running', 'stopped', 'maintenance'].includes(b.status) ? b.status : row.status;
+      const name = String(b.name ?? row.name).trim();
+      const host = String(b.ssh_host ?? row.ssh_host).trim();
+      if (!name || !host) return err('名称和主机/IP 为必填项');
+      const port = Math.min(65535, Math.max(1, Number(b.ssh_port ?? row.ssh_port) || 22));
+      const user = String(b.ssh_username ?? row.ssh_username).trim().slice(0, 64);
+      const auth = (b.ssh_auth ?? row.ssh_auth) === 'key' ? 'key' : 'password';
+      // SSH 凭据：仅在提供新值时覆盖；留空保持原值，显式 clear_secret=true 才清空
+      let secretEnc = row.ssh_secret_enc || '';
+      if (b.clear_secret === true) {
+        secretEnc = '';
+      } else if (typeof b.ssh_secret === 'string' && b.ssh_secret.trim()) {
+        secretEnc = await encSecret(env, b.ssh_secret.trim());
+        if (!secretEnc) return err('SSH 凭据加密失败，请检查 SSH_ENC_KEY 配置');
+      }
       await db
         .prepare(
-          'UPDATE vps SET name=?, ip=?, region=?, spec=?, provider=?, status=?, price=?, expire_date=?, remark=?, updated_at=? WHERE id=?'
+          'UPDATE vps SET name=?, ssh_host=?, ssh_port=?, ssh_username=?, ssh_auth=?, ssh_secret_enc=?, remark=?, updated_at=? WHERE id=?'
         )
-        .bind(
-          String(b.name ?? row.name).trim(),
-          String(b.ip ?? row.ip).trim(),
-          String(b.region ?? row.region),
-          String(b.spec ?? row.spec),
-          String(b.provider ?? row.provider),
-          status,
-          Number(b.price ?? row.price) || 0,
-          String(b.expire_date ?? row.expire_date),
-          String(b.remark ?? row.remark),
-          nowStr(),
-          id
-        )
+        .bind(name, host, port, user, auth, secretEnc, String(b.remark ?? row.remark).slice(0, 500), nowStr(), id)
         .run();
       await addLog(db, username, '修改', row.name, `修改 VPS 记录 #${id}`, ip);
       return ok({});
@@ -474,13 +619,19 @@ async function handleApi(request, env, url) {
     const row = await db.prepare('SELECT * FROM vps WHERE id = ?').bind(id).first();
     if (!row) return err('记录不存在', 404);
     const b = await request.json().catch(() => ({}));
-    const map = { start: 'running', stop: 'stopped', restart: 'running' };
-    const next = map[b.action];
-    if (!next) return err('未知操作');
-    await db.prepare('UPDATE vps SET status = ?, updated_at = ? WHERE id = ?').bind(next, nowStr(), id).run();
-    const label = { start: '启动', stop: '停止', restart: '重启' }[b.action];
-    await addLog(db, username, label, row.name, `${label} VPS #${id}`, ip);
-    return ok({ status: next });
+    if (b.action !== 'sync') return err('未知操作');
+    // 建同步任务 → 触发 GitHub Actions 执行器（payload 不含凭据）
+    const jobId = await createSyncJob(db, id);
+    const d = await dispatchSync(env, jobId, id);
+    if (!d.ok) {
+      await db.prepare("UPDATE vps SET sync_status='error', sync_error=?, updated_at=? WHERE id=?").bind(d.error.slice(0, 300), nowStr(), id).run();
+      await db.prepare("UPDATE sync_jobs SET status='failed', updated_at=? WHERE id=?").bind(nowStr(), jobId).run();
+      await addLog(db, username, '同步', row.name, `同步触发失败：${d.error}`, ip, 'fail');
+      return err(d.error);
+    }
+    await db.prepare("UPDATE vps SET sync_status='running', sync_error='', updated_at=? WHERE id=?").bind(nowStr(), id).run();
+    await addLog(db, username, '同步', row.name, `触发配置/归属地同步 #${id}（job ${jobId.slice(0, 8)}）`, ip);
+    return ok({ sync_status: 'running', job_id: jobId });
   }
 
   // 操作日志
@@ -623,6 +774,10 @@ async function handleApi(request, env, url) {
     }
     if (typeof b.gh_token_type === 'string' && ['classic', 'fine'].includes(b.gh_token_type)) {
       batch.push(up.bind('gh_token_type', b.gh_token_type));
+    }
+    // 回调密钥：用户自设（需与 GitHub Secrets 的 CALLBACK_SECRET 一致），仅非空时覆盖
+    if (typeof b.callback_secret === 'string' && b.callback_secret.trim()) {
+      batch.push(up.bind('sync_callback_secret', b.callback_secret.trim().slice(0, 128)));
     }
     if (b.reset_callback === true) batch.push(up.bind('sync_callback_secret', randomHex(32)));
     if (!batch.length) return err('没有需要保存的内容');

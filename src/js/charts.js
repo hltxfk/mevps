@@ -4,7 +4,7 @@
    * 面积折线图（成本趋势）
    * data: [{ date: 'MM-DD', cost: number }]
    */
-  MEVPS.chartTrend = function (el, data, { color = '#646cff' } = {}) {
+  MEVPS.chartTrend = function (el, data, { color = '#646cff', valueKey = 'cost', prefix = '\u00a5' } = {}) {
     if (!data || !data.length) {
       el.innerHTML = '<div class="empty">暂无数据</div>';
       return;
@@ -14,11 +14,11 @@
     const pad = { l: 48, r: 16, t: 16, b: 30 };
     const iw = W - pad.l - pad.r;
     const ih = H - pad.t - pad.b;
-    const max = Math.max(...data.map((d) => d.cost), 1) * 1.2;
+    const max = Math.max(...data.map((d) => d[valueKey]), 1) * 1.2;
     const x = (i) => pad.l + (iw * i) / Math.max(1, data.length - 1);
     const y = (v) => pad.t + ih - (ih * v) / max;
 
-    const pts = data.map((d, i) => [x(i), y(d.cost)]);
+    const pts = data.map((d, i) => [x(i), y(d[valueKey])]);
     const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
     const area = `${line} L ${x(data.length - 1).toFixed(1)} ${pad.t + ih} L ${pad.l} ${pad.t + ih} Z`;
 
@@ -35,7 +35,7 @@
       .join('');
 
     const dots = pts
-      .map((p, i) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="#fff" stroke="${color}" stroke-width="2"><title>${data[i].date}：${MEVPS.fmtMoney(data[i].cost)}</title></circle>`)
+      .map((p, i) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="#fff" stroke="${color}" stroke-width="2"><title>${data[i].date}：${prefix}${data[i][valueKey]}</title></circle>`)
       .join('');
 
     el.innerHTML = `

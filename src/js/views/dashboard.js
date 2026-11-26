@@ -11,11 +11,11 @@ Views.dashboard = {
       </div>
       <div class="charts-grid">
         <div class="card">
-          <div class="card-header">近 7 天成本趋势<span class="muted" style="font-size:12px;color:#999;font-weight:400">日均摊成本</span></div>
+          <div class="card-header">近 7 天新增 VPS<span class="muted" style="font-size:12px;color:#999;font-weight:400">每日新增记录</span></div>
           <div class="card-body"><div class="chart-wrap" id="chart-trend"></div></div>
         </div>
         <div class="card">
-          <div class="card-header">VPS 状态分布</div>
+          <div class="card-header">同步状态分布</div>
           <div class="card-body" id="chart-donut"></div>
         </div>
       </div>
@@ -40,9 +40,9 @@ Views.dashboard = {
 
     const cards = [
       { label: 'VPS 总数', value: s.total, sub: '全部在册服务器', icon: 'server', cls: 'green' },
-      { label: '运行中', value: s.running, sub: '状态正常运行', icon: 'play', cls: 'blue' },
-      { label: '已停止 / 维护', value: s.stopped + s.maintenance, sub: `停止 ${s.stopped} · 维护 ${s.maintenance}`, icon: 'stop', cls: 'orange' },
-      { label: '月度总成本', value: MEVPS.fmtMoney(s.monthlyCost), sub: '按当前配置估算', icon: 'money', cls: 'purple' },
+      { label: '在线', value: s.online, sub: '连接检测可达', icon: 'play', cls: 'blue' },
+      { label: '离线 / 未检测', value: s.offline + s.unknown, sub: `离线 ${s.offline} · 未检测 ${s.unknown}`, icon: 'stop', cls: 'orange' },
+      { label: '已同步', value: (s.dist || []).filter((d) => d.status === 'ok').reduce((a, b) => a + b.count, 0), sub: '配置 / 归属地已回填', icon: 'check', cls: 'purple' },
     ];
     MEVPS.$('#stat-cards').innerHTML = cards
       .map(
@@ -57,16 +57,16 @@ Views.dashboard = {
       )
       .join('');
 
-    MEVPS.chartTrend(MEVPS.$('#chart-trend'), s.trend);
+    MEVPS.chartTrend(MEVPS.$('#chart-trend'), s.trend, { valueKey: 'count', prefix: '' });
 
-    const colorMap = { running: '#52c41a', stopped: '#999999', maintenance: '#faad14' };
-    const nameMap = { running: '运行中', stopped: '已停止', maintenance: '维护中' };
+    const colorMap = { ok: '#52c41a', running: '#646cff', pending: '#faad14', error: '#f5222d', idle: '#999999' };
+    const nameMap = { ok: '已同步', running: '同步中', pending: '待同步', error: '同步失败', idle: '未同步' };
     MEVPS.chartDonut(
       MEVPS.$('#chart-donut'),
       (s.dist || []).map((d) => ({ label: nameMap[d.status] || d.status, count: d.count, color: colorMap[d.status] || '#646cff' }))
     );
 
-    const tagMap = { 登录: 'tag-success', 新增: 'tag-info', 修改: 'tag-warning', 删除: 'tag-error', 登出: 'tag-default', 初始化: 'tag-default', 启动: 'tag-success', 停止: 'tag-default', 重启: 'tag-warning', 设置: 'tag-info' };
+    const tagMap = { 登录: 'tag-success', 新增: 'tag-info', 修改: 'tag-warning', 删除: 'tag-error', 登出: 'tag-default', 初始化: 'tag-default', 启动: 'tag-success', 停止: 'tag-default', 重启: 'tag-warning', 设置: 'tag-info', 同步: 'tag-info' };
     MEVPS.$('#recent-logs').innerHTML =
       (s.recentLogs || []).map((l) => `
         <div class="log-item">
@@ -75,8 +75,8 @@ Views.dashboard = {
           <span class="log-time">${MEVPS.fmtTime(l.created_at)}</span>
         </div>`).join('') || '<div class="empty">暂无日志</div>';
 
-    const expireRows = (s.expireSoon || [])
-      .map((v) => `<div class="info-row"><span class="k">${MEVPS.esc(v.name)}</span><span class="v">${MEVPS.esc(v.expire_date || '-')}</span></div>`)
+    const needRows = (s.needSync || [])
+      .map((v) => `<div class="info-row"><span class="k">${MEVPS.esc(v.name)}</span><span class="v">${MEVPS.esc(v.sync_status === 'error' ? (v.sync_error || '同步失败') : v.sync_status)}</span></div>`)
       .join('');
     MEVPS.$('#sys-info').innerHTML = `
       <div class="info-row"><span class="k">站点名称</span><span class="v">${MEVPS.esc(s.siteName)}</span></div>
@@ -84,6 +84,6 @@ Views.dashboard = {
       <div class="info-row"><span class="k">运行平台</span><span class="v">Cloudflare Workers</span></div>
       <div class="info-row"><span class="k">数据存储</span><span class="v">D1 · 绑定 db</span></div>
       <div class="info-row"><span class="k">静态资源</span><span class="v">边缘直出 · 内容哈希缓存</span></div>
-      ${expireRows ? `<div style="border-top:1px dashed #efeff2;padding-top:12px;font-size:12px;color:#999">最近到期</div>${expireRows}` : ''}`;
+      ${needRows ? `<div style="border-top:1px dashed #efeff2;padding-top:12px;font-size:12px;color:#999">待同步 / 同步失败</div>${needRows}` : ''}`;
   },
 };

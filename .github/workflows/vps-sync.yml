@@ -1,0 +1,115 @@
+# VPS 同步执行器：由 Cloudflare Worker 通过 repository_dispatch 触发。
+# 安全约定：
+#   - dispatch payload 只含 job_id/vps_id，不含任何凭据；
+#   - SSH 凭据通过 HMAC 签名的内部接口临时取用，用完即弃，不落 GitHub Secrets/日志；
+#   - 所有敏感值 ::add-mask:: 打码，避免泄漏进 Actions 日志。
+name: VPS Sync · SSH 执行器
+
+on:
+  repository_dispatch:
+    types: [vps-sync]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vps-sync-${{ github.event.client_payload.vps_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 安装 sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+
+      - name: SSH 采集配置 + 查询归属地并回传
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          JOB_ID: ${{ github.event.client_payload.job_id }}
+        run: |
+          set -euo pipefail
+          : "${WORKER_URL:?请在 GitHub Secrets 配置 WORKER_URL}"
+          : "${CALLBACK_SECRET:?请在 GitHub Secrets 配置 CALLBACK_SECRET}"
+          : "${JOB_ID:?repository_dispatch 缺少 job_id}"
+
+          hmac() { printf '%s' "$1" | openssl dgst -sha256 -hmac "$CALLBACK_SECRET" -hex | awk '{print $NF}'; }
+          post() {
+            local path="$1" body="$2" sig
+            sig=$(hmac "$body")
+            curl -fsS -X POST "$WORKER_URL$path" \
+              -H 'Content-Type: application/json' \
+              -H "X-MEVPS-Signature: $sig" \
+              -d "$body"
+          }
+
+          # 1) 取连接凭据（HMAC 鉴权，临时取用）
+          cred_body=$(jq -nc --arg j "$JOB_ID" '{job_id:$j}')
+          creds=$(post "/api/internal/creds" "$cred_body")
+          HOST=$(jq -r '.data.host' <<<"$creds")
+          PORT=$(jq -r '.data.port // 22' <<<"$creds")
+          USER=$(jq -r '.data.username // "root"' <<<"$creds")
+          AUTH=$(jq -r '.data.auth // "password"' <<<"$creds")
+          SECRET=$(jq -r '.data.secret // ""' <<<"$creds")
+          ::add-mask::$SECRET
+          ::add-mask::$HOST
+
+          KEYFILE=""
+          cleanup() { [ -n "$KEYFILE" ] && rm -f "$KEYFILE"; }
+          trap cleanup EXIT
+
+          # 2) SSH 采集
+          ONLINE=false
+          ERR=""
+          SPEC=""
+          COUNTRY=""
+          CITY=""
+
+          SSH_BASE="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -o LogLevel=ERROR -p $PORT"
+          if [ "$AUTH" = "key" ]; then
+            KEYFILE=$(mktemp)
+            printf '%s\n' "$SECRET" > "$KEYFILE"
+            chmod 600 "$KEYFILE"
+          fi
+          run_ssh() {
+            if [ "$AUTH" = "key" ]; then
+              ssh $SSH_BASE -i "$KEYFILE" "$USER@$HOST" "$@"
+            else
+              sshpass -p "$SECRET" ssh $SSH_BASE "$USER@$HOST" "$@"
+            fi
+          }
+
+          echo 'c2V0ICtlCm9zPSQoLiAvZXRjL29zLXJlbGVhc2UgMj4vZGV2L251bGw7IGVjaG8gIiR7UFJFVFRZX05BTUU6LSQodW5hbWUgLXMpfSIpCmNwdT0kKG5wcm9jIDI+L2Rldi9udWxsIHx8IGVjaG8gMCkKbWVtPSQoZnJlZSAtaCAyPi9kZXYvbnVsbCB8IGF3ayAnL15NZW06L3twcmludCAkMn0nKQpkaXNrPSQoZGYgLWggLyAyPi9kZXYvbnVsbCB8IGF3ayAnTlI9PTJ7cHJpbnQgJDJ9JykKcHJpbnRmICdPUz0lc1xuQ1BVPSVzQ1xuTUVNPSVzXG5ESVNLPSVzXG4nICIkb3MiICIkY3B1IiAiJG1lbSIgIiRkaXNrIgo=' | base64 -d > /tmp/collect.sh
+          if OUT=$(run_ssh 'bash -s' < /tmp/collect.sh 2>/tmp/ssh_err); then
+            ONLINE=true
+            os=$(awk -F= '/^OS=/{sub(/^OS=/,"");print}' <<<"$OUT" | tail -1)
+            cpu=$(awk -F= '/^CPU=/{print $2}' <<<"$OUT" | tail -1)
+            mem=$(awk -F= '/^MEM=/{print $2}' <<<"$OUT" | tail -1)
+            disk=$(awk -F= '/^DISK=/{print $2}' <<<"$OUT" | tail -1)
+            SPEC="${cpu} / ${mem} / ${disk} / ${os}"
+            SPEC=$(printf '%s' "$SPEC" | cut -c1-300)
+          else
+            ERR=$(head -c 200 /tmp/ssh_err 2>/dev/null | tr '\n' ' ')
+            ERR=${ERR:-SSH 连接失败}
+          fi
+
+          # 3) 归属地（国家 + 城市/地区）
+          if [ "$ONLINE" = "true" ] || [ -n "$HOST" ]; then
+            GEO=$(curl -fsS "http://ip-api.com/json/${HOST}?fields=status,country,regionName,city" 2>/dev/null || echo '{}')
+            COUNTRY=$(jq -r '.country // ""' <<<"$GEO")
+            CITY=$(jq -r '[.city, .regionName] | map(select(. != null and . != "")) | join(" ")' <<<"$GEO")
+          fi
+
+          # 4) 回传结果（HMAC 鉴权）
+          res_body=$(jq -nc \
+            --arg job "$JOB_ID" \
+            --arg country "$COUNTRY" \
+            --arg city "$CITY" \
+            --arg spec "$SPEC" \
+            --arg err "$ERR" \
+            --argjson online "$ONLINE" \
+            '{job_id:$job, country:$country, city:$city, spec:$spec, online:$online, ok:$online, error:$err}')
+          post "/api/internal/result" "$res_body" >/dev/null
+          echo "同步完成 online=$ONLINE spec=$SPEC geo=$COUNTRY $CITY"
