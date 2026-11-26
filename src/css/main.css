@@ -39,6 +39,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .hidden { display: none !important; }
+
+/* 首屏登录态预判：html.authed 时直接进后台，避免闪现登录框 */
+html.authed #login-page { display: none !important; }
+html.authed #app-layout { display: flex !important; }
 a { color: var(--primary); text-decoration: none; }
 code { background: #f0f1f5; border-radius: 4px; padding: 1px 6px; font-size: 12px; color: var(--error); }
 

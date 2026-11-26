@@ -7,6 +7,12 @@
     <meta name="buildTime" content="{{BUILD_TIME}}" />
     <link rel="icon" href="/favicon.svg" />
     <title>MEVPS · 服务器管理面板</title>
+    <script>
+      // 首屏预判：本地已有登录态则直接标记 authed，避免刷新时先闪登录框再进后台
+      try {
+        if (localStorage.getItem('mevps_token')) document.documentElement.classList.add('authed');
+      } catch (e) {}
+    </script>
     <!--{{CSS}}-->
   </head>
   <body>

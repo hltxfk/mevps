@@ -925,11 +925,13 @@ Views.settings = {
   const appLayout = () => document.getElementById('app-layout');
 
   function showLogin() {
+    document.documentElement.classList.remove('authed');
     loginPage().classList.remove('hidden');
     appLayout().classList.add('hidden');
   }
 
   function showLayout() {
+    document.documentElement.classList.add('authed');
     loginPage().classList.add('hidden');
     appLayout().classList.remove('hidden');
     const user = MEVPS.savedUser() || 'admin';
@@ -1102,19 +1104,21 @@ Views.settings = {
   MEVPS.$$('.login-icon-btn').forEach((s) => s.addEventListener('click', () => MEVPS.toast('演示环境暂未开放该功能', 'info')));
 
   /* ---------------- 启动 ---------------- */
-  (async function boot() {
+  (function boot() {
     if (!MEVPS.getToken()) {
       showLogin();
       return;
     }
-    try {
-      const me = await MEVPS.api('/me');
-      MEVPS.setToken(MEVPS.getToken(), me.username);
-      showLayout();
-      if (!location.hash) location.hash = '#/dashboard';
-      route();
-    } catch (e) {
-      /* 401 已由 api.js 处理 */
-    }
+    // 乐观渲染：本地已有登录态就立刻进后台，不阻塞在 /me 网络往返上，
+    // 避免刷新时闪现登录框；会话校验放后台静默进行，
+    // 若已过期，api.js 的 401 → mevps:unauthorized 会自动跳回登录页。
+    showLayout();
+    if (!location.hash) location.hash = '#/dashboard';
+    route();
+    MEVPS.api('/me')
+      .then((me) => MEVPS.setToken(MEVPS.getToken(), me.username))
+      .catch(() => {
+        /* 401 已由 mevps:unauthorized 处理 */
+      });
   })();
 })();
