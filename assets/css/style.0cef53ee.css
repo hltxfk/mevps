@@ -362,5 +362,5 @@ table.table { width: 100%; border-collapse: collapse; }
   .stat-grid { grid-template-columns: 1fr; }
 }
 
-/* ---- 统一控件高度 32px（textarea 除外）：工具栏搜索框/下拉框/按钮 + 各页文本输入框 ---- */
-.input:not(textarea), .select, .btn-sm, .toolbar .input, .toolbar .select { height: 32px; }
+/* ---- 统一控件样式（textarea 除外）：高度 32px、圆角 6px 与按钮一致 ---- */
+.input:not(textarea), .select, .btn-sm, .toolbar .input, .toolbar .select { height: 32px; border-radius: 6px; }
