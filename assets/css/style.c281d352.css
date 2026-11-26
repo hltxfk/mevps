@@ -181,13 +181,14 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 
 /* ---------------- 卡片 ---------------- */
 .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow-card); }
-.card + .card { margin-top: 16px; }
+/* 顶层模块间的纵向间距（不作用于网格内并排的卡片） */
+.content > * + * { margin-top: 16px; }
 .card-header { padding: 16px 20px; font-size: 15px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
 .card-body { padding: 0 20px 20px; }
 .card-body.no-pad { padding: 0; }
 
 /* ---------------- 仪表盘 ---------------- */
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 .stat-card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow-card); padding: 20px; display: flex; align-items: center; gap: 16px; }
 .stat-icon { width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .stat-icon.green { background: var(--primary-suppl); color: var(--primary); }
@@ -198,7 +199,7 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .stat-info .stat-value { font-size: 24px; font-weight: 700; line-height: 1.2; }
 .stat-info .stat-sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
 
-.charts-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; margin-bottom: 16px; }
+.charts-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; }
 .chart-wrap { width: 100%; }
 .donut-flex { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 .donut-legend { display: flex; flex-direction: column; gap: 10px; }
@@ -243,7 +244,7 @@ table.table { width: 100%; border-collapse: collapse; }
 .tag-info { background: #eef0ff; color: var(--info); }
 .tag-default { background: #f0f1f5; color: var(--text-2); }
 
-.pagination { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 16px 20px; }
+.pagination { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 16px 0 0; }
 .pagination .total { color: var(--text-3); font-size: 13px; margin-right: 8px; }
 .page-btn {
   min-width: 30px; height: 30px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-strong);
