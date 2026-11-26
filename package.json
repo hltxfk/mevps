@@ -11,7 +11,7 @@
     "publish": false,
     "bindings": {
       "db": {
-        "description": "D1 数据库。绑定变量名固定为 `db`，数据库默认名为 `mymail`（部署时自动创建，首次请求自动建表）。"
+        "description": "D1 数据库。绑定变量名固定为 `db`，数据库默认名为 `mevps`（部署时自动创建，首次请求自动建表）。"
       }
     }
   },

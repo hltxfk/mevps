@@ -735,7 +735,7 @@ Views.settings = {
             <div class="info-row"><span class="k">前端资源</span><span class="v">assets/ 静态资源 · Cloudflare 边缘直接响应</span></div>
             <div class="info-row"><span class="k">缓存策略</span><span class="v">内容哈希文件名 · 长期缓存（immutable）</span></div>
             <div class="info-row"><span class="k">Worker 额度</span><span class="v">静态资源命中不进入 Worker，不消耗请求额度</span></div>
-            <div class="info-row"><span class="k">数据存储</span><span class="v">D1（绑定变量名 db · 库名 mymail），表结构自动初始化</span></div>
+            <div class="info-row"><span class="k">数据存储</span><span class="v">D1（绑定变量名 db · 库名 mevps），表结构自动初始化</span></div>
             <div class="info-row"><span class="k">主题风格</span><span class="v">SoybeanAdmin（NaiveUI 设计语言）</span></div>
           </div>
         </div>

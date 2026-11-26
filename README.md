@@ -26,7 +26,7 @@
 3. **Worker 请求额度：静态资源命中不消耗**
    `wrangler.jsonc` 中 `assets.run_worker_first = ["/api/*"]`，只有 `/api/*` 会进入 Worker（API 与鉴权），其余请求由静态资源层直接处理。
 
-数据存储：**D1**，绑定变量名固定为 **`db`**，数据库默认名为 **`mymail`**。所有"变量 / 配置"全部写入 D1 的 `settings` 表（不使用环境变量）；表结构与默认账号在**首次 API 请求时自动初始化**，无需手动执行 SQL。
+数据存储：**D1**，绑定变量名固定为 **`db`**，数据库默认名为 **`mevps`**。所有"变量 / 配置"全部写入 D1 的 `settings` 表（不使用环境变量）；表结构与默认账号在**首次 API 请求时自动初始化**，无需手动执行 SQL。
 
 ## 🚀 部署一：Cloudflare 控制台（浏览器操作，推荐）
 
@@ -37,18 +37,18 @@
    - Deploy command：`npm run deploy`（即 `wrangler deploy`）
 4. 点击 **Deploy**。部署过程中 Cloudflare 会**自动创建 D1 数据库并绑定**：
    - 绑定变量名固定为 **`db`**
-   - 数据库名称默认 **`mymail`**（部署设置页可改，改了也不影响，变量名仍是 `db`）
+   - 数据库名称默认 **`mevps`**（部署设置页可改，改了也不影响，变量名仍是 `db`）
 5. 部署完成后访问 `https://<worker名>.<你的子域>.workers.dev`，用 `admin / 123456` 登录。
 
 > 也可以点 README 顶部的 **Deploy to Cloudflare** 一键按钮，效果相同（会先把仓库克隆到你自己账号下）。
 
 ## 🔧 部署二：控制台手动创建（不接 Git）
 
-1. **创建 D1**：控制台 → D1 → Create database，名称填 `mymail`；
+1. **创建 D1**：控制台 → D1 → Create database，名称填 `mevps`；
 2. **创建 Worker**：Workers & Pages → Create → Worker，命名 `mevps`；
 3. **粘贴代码**：打开 `worker.js` 全文，粘贴到在线编辑器，Deploy；
 4. **上传静态资源**：Worker 页面 → Assets（静态资源）→ 上传 `assets/` 目录下所有文件（含 `_headers`）；如界面提供路由选项，选择"单页应用（SPA）回退"，并将 `/api/*` 设为 Worker 优先（`run_worker_first`）；
-5. **绑定 D1**：Worker → Settings → Bindings → Add → D1 Database，**Variable name 填 `db`**，D1 database 选 `mymail`；
+5. **绑定 D1**：Worker → Settings → Bindings → Add → D1 Database，**Variable name 填 `db`**，D1 database 选 `mevps`；
 6. 保存部署。表结构与默认账号在首次打开页面时自动初始化。
 
 > 手动模式下即使不配 `run_worker_first`，Worker 脚本也能正确兜底（非 `/api/*` 请求自动回退到 `index.html`），
@@ -58,7 +58,7 @@
 
 ```bash
 npm run build          # 构建前端（零依赖，Node >= 20）
-npx wrangler d1 create mymail   # 记下返回的 database_id，填入 wrangler.jsonc
+npx wrangler d1 create mevps   # 记下返回的 database_id，填入 wrangler.jsonc
 npx wrangler deploy
 ```
 
