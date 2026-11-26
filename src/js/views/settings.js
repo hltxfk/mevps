@@ -13,9 +13,9 @@ Views.settings = {
           <div class="card-body">
             <div class="settings-form">
               <label class="field"><span class="field-label">站点名称</span>
-                <input class="input" id="s-name" maxlength="50" /></label>
+                <input class="input" id="s-name" maxlength="50" spellcheck="false" /></label>
               <label class="field"><span class="field-label">站点描述</span>
-                <textarea class="input" id="s-desc" maxlength="200"></textarea></label>
+                <textarea class="input" id="s-desc" maxlength="200" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea></label>
               <label class="field"><span class="field-label">会话有效期（小时）</span>
                 <input class="input" id="s-session" type="number" min="1" max="720" /></label>
               <div class="form-actions"><button class="btn btn-primary" id="s-save">保存设置</button></div>
