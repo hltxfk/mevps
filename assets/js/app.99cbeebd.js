@@ -602,13 +602,13 @@ Views.vps = {
           <input class="input" id="a-event" value="${MEVPS.esc(cfg.event || 'vps-sync')}" placeholder="vps-sync" spellcheck="false" autocomplete="off" /></label>
         <label class="field"><span class="field-label">GitHub Token</span>
           <input class="input" id="a-token" type="password" value="" autocomplete="off" spellcheck="false"
-            placeholder="${cfg.has_token ? '已配置，留空保持不变' : 'ghp_xxx 或细粒度 PAT'}" /></label>
+            placeholder="${cfg.has_token ? '已配置，留空保持不变' : '粘贴 PAT（classic 或细粒度）'}" /></label>
         <div class="field span-2">
           <p class="muted" style="font-size:12px;line-height:1.9;margin:0">
             ${MEVPS.icon('info', 13)} Token 仅用于调用 GitHub API 触发 Actions（<code>repository_dispatch</code>）。<br/>
-            ${MEVPS.icon('check', 13)} 建议用<strong>细粒度 PAT</strong>，只授该仓库的 <code>Actions: write</code>；切勿用全权限 classic PAT。<br/>
-            ${MEVPS.icon('check', 13)} 保存后 Token 以 <strong>AES-256-GCM 加密</strong>落库，界面永不回显明文。<br/>
-            ${MEVPS.icon(cfg.enc_source === 'secret' ? 'check' : 'info', 13)} 加密密钥来源：<code>${cfg.enc_source === 'secret' ? 'SSH_ENC_KEY（Cloudflare Secret，安全）' : 'D1 自生成（仅混淆，建议配置 SSH_ENC_KEY）'}</code>
+            ${MEVPS.icon('info', 13)} Classic PAT 需勾选 <code>repo</code> 权限（私有仓库必需）；细粒度 PAT 仅需 <code>Actions: write</code>。<br/>
+            ${MEVPS.icon('check', 13)} 保存后 Token 以 <strong>AES-256-GCM</strong> 加密落库，界面永不回显明文，日志不打印。<br/>
+            ${MEVPS.icon('info', 13)} 加密密钥来源：<code>${cfg.enc_source === 'secret' ? 'SSH_ENC_KEY（Cloudflare Secret）' : 'D1 settings 表'}</code>
           </p>
         </div>
       </div>`;
