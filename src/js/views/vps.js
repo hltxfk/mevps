@@ -82,7 +82,7 @@ Views.vps = {
           <td class="actions">
             <a class="link" data-act="toggle" data-id="${v.id}" data-status="${v.status}">${v.status === 'running' ? '停止' : '启动'}</a>
             <a class="link" data-act="edit" data-id="${v.id}">编辑</a>
-            <a class="link" style="color:#d03050" data-act="del" data-id="${v.id}">删除</a>
+            <a class="link" style="color:#f5222d" data-act="del" data-id="${v.id}">删除</a>
           </td>
         </tr>`).join('') || '<tr><td colspan="10" class="empty">暂无数据</td></tr>';
 

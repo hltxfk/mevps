@@ -4,7 +4,7 @@
    * 面积折线图（成本趋势）
    * data: [{ date: 'MM-DD', cost: number }]
    */
-  MEVPS.chartTrend = function (el, data, { color = '#18a058' } = {}) {
+  MEVPS.chartTrend = function (el, data, { color = '#646cff' } = {}) {
     if (!data || !data.length) {
       el.innerHTML = '<div class="empty">暂无数据</div>';
       return;

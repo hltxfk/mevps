@@ -59,11 +59,11 @@ Views.dashboard = {
 
     MEVPS.chartTrend(MEVPS.$('#chart-trend'), s.trend);
 
-    const colorMap = { running: '#18a058', stopped: '#999999', maintenance: '#f0a020' };
+    const colorMap = { running: '#52c41a', stopped: '#999999', maintenance: '#faad14' };
     const nameMap = { running: '运行中', stopped: '已停止', maintenance: '维护中' };
     MEVPS.chartDonut(
       MEVPS.$('#chart-donut'),
-      (s.dist || []).map((d) => ({ label: nameMap[d.status] || d.status, count: d.count, color: colorMap[d.status] || '#2080f0' }))
+      (s.dist || []).map((d) => ({ label: nameMap[d.status] || d.status, count: d.count, color: colorMap[d.status] || '#646cff' }))
     );
 
     const tagMap = { 登录: 'tag-success', 新增: 'tag-info', 修改: 'tag-warning', 删除: 'tag-error', 登出: 'tag-default', 初始化: 'tag-default', 启动: 'tag-success', 停止: 'tag-default', 重启: 'tag-warning', 设置: 'tag-info' };
