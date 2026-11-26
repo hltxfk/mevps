@@ -58,8 +58,7 @@
 
 ```bash
 npm run build          # 构建前端（零依赖，Node >= 20）
-npx wrangler d1 create mevps   # 记下返回的 database_id，填入 wrangler.jsonc
-npx wrangler deploy
+npx wrangler deploy   # 不写 database_id，部署时自动创建 D1「mevps」并绑定 db（数据不丢）
 ```
 
 ## 📂 项目结构
