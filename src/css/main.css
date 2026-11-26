@@ -207,19 +207,8 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .breadcrumb b { color: var(--text-1); font-weight: 500; }
 .breadcrumb i { font-style: normal; color: var(--border-strong); }
 
-.user-chip { position: relative; display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 10px; border-radius: 8px; font-size: 14px; transition: background 0.2s; }
-.user-chip:hover { background: #f0f1f5; }
+.user-chip { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; font-size: 14px; }
 .avatar { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, #7c82ff, #4b54e6); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; }
-.dropdown {
-  position: absolute; top: calc(100% + 8px); right: 0; width: 150px; background: #fff;
-  border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; display: none;
-}
-.user-chip.open .dropdown { display: block; }
-.dropdown-item { padding: 8px 12px; border-radius: 6px; font-size: 13px; color: var(--text-1); cursor: pointer; }
-.dropdown-item:hover { background: #f5f7f9; }
-.dropdown-item.danger { color: var(--error); }
-.dropdown-item.danger:hover { background: rgba(245, 34, 45, 0.06); }
-.dropdown-divider { height: 1px; background: var(--border); margin: 6px 4px; }
 
 /* 多标签页（SoybeanAdmin 经典 TagsView） */
 .tabs-bar {

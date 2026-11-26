@@ -854,6 +854,15 @@ Views.settings = {
             <div class="info-row"><span class="k">主题风格</span><span class="v">SoybeanAdmin（NaiveUI 设计语言）</span></div>
           </div>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-header">退出登录</div>
+        <div class="card-body">
+          <button class="btn btn-danger" id="s-logout">退 出 登 录</button>
+          <p style="margin-top:12px;font-size:12px;color:#999;line-height:1.8">
+            退出当前账号并返回登录页，未保存的表单内容将会丢失。
+          </p>
+        </div>
       </div>`;
 
     let s;
@@ -868,6 +877,8 @@ Views.settings = {
     MEVPS.$('#s-session').value = s.session_hours;
     MEVPS.$('#s-init-at').textContent = s.init_at || '-';
     MEVPS.$('#p-username').value = MEVPS.savedUser() || 'admin';
+
+    MEVPS.$('#s-logout').addEventListener('click', () => MEVPS.logout());
 
     MEVPS.$('#s-save').addEventListener('click', async () => {
       try {
@@ -1054,15 +1065,8 @@ Views.settings = {
     MEVPS.$('.logo-text', sider).style.display = collapsed ? '' : 'none';
   });
 
-  const userChip = document.getElementById('user-chip');
-  userChip.addEventListener('click', (e) => {
-    if (!e.target.closest('.dropdown')) userChip.classList.toggle('open');
-  });
-  document.addEventListener('click', (e) => {
-    if (!userChip.contains(e.target)) userChip.classList.remove('open');
-  });
-
-  document.getElementById('menu-logout').addEventListener('click', async () => {
+  /* ---------------- 退出登录（系统设置页调用） ---------------- */
+  MEVPS.logout = async function () {
     try {
       await MEVPS.api('/logout', { method: 'POST', body: {} });
     } catch (e) {
@@ -1072,19 +1076,7 @@ Views.settings = {
     tabs = [];
     showLogin();
     MEVPS.toast('已退出登录', 'info');
-  });
-
-  document.getElementById('menu-settings').addEventListener('click', () => {
-    location.hash = '#/settings';
-  });
-
-  document.getElementById('menu-profile').addEventListener('click', () => {
-    location.hash = '#/settings';
-    setTimeout(() => {
-      const el = document.getElementById('p-old');
-      if (el) el.focus();
-    }, 120);
-  });
+  };
 
   /* ---------------- 未授权跳转 ---------------- */
   window.addEventListener('mevps:unauthorized', () => {

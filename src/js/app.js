@@ -138,15 +138,8 @@
     MEVPS.$('.logo-text', sider).style.display = collapsed ? '' : 'none';
   });
 
-  const userChip = document.getElementById('user-chip');
-  userChip.addEventListener('click', (e) => {
-    if (!e.target.closest('.dropdown')) userChip.classList.toggle('open');
-  });
-  document.addEventListener('click', (e) => {
-    if (!userChip.contains(e.target)) userChip.classList.remove('open');
-  });
-
-  document.getElementById('menu-logout').addEventListener('click', async () => {
+  /* ---------------- 退出登录（系统设置页调用） ---------------- */
+  MEVPS.logout = async function () {
     try {
       await MEVPS.api('/logout', { method: 'POST', body: {} });
     } catch (e) {
@@ -156,19 +149,7 @@
     tabs = [];
     showLogin();
     MEVPS.toast('已退出登录', 'info');
-  });
-
-  document.getElementById('menu-settings').addEventListener('click', () => {
-    location.hash = '#/settings';
-  });
-
-  document.getElementById('menu-profile').addEventListener('click', () => {
-    location.hash = '#/settings';
-    setTimeout(() => {
-      const el = document.getElementById('p-old');
-      if (el) el.focus();
-    }, 120);
-  });
+  };
 
   /* ---------------- 未授权跳转 ---------------- */
   window.addEventListener('mevps:unauthorized', () => {

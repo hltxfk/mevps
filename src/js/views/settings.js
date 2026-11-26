@@ -56,6 +56,15 @@ Views.settings = {
             <div class="info-row"><span class="k">主题风格</span><span class="v">SoybeanAdmin（NaiveUI 设计语言）</span></div>
           </div>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-header">退出登录</div>
+        <div class="card-body">
+          <button class="btn btn-danger" id="s-logout">退 出 登 录</button>
+          <p style="margin-top:12px;font-size:12px;color:#999;line-height:1.8">
+            退出当前账号并返回登录页，未保存的表单内容将会丢失。
+          </p>
+        </div>
       </div>`;
 
     let s;
@@ -70,6 +79,8 @@ Views.settings = {
     MEVPS.$('#s-session').value = s.session_hours;
     MEVPS.$('#s-init-at').textContent = s.init_at || '-';
     MEVPS.$('#p-username').value = MEVPS.savedUser() || 'admin';
+
+    MEVPS.$('#s-logout').addEventListener('click', () => MEVPS.logout());
 
     MEVPS.$('#s-save').addEventListener('click', async () => {
       try {
