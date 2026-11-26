@@ -47,15 +47,21 @@
 
   /* ---------------- 侧边菜单 ---------------- */
   function renderMenu(active) {
-    document.getElementById('side-menu').innerHTML = MENU.map((key) => {
-      const v = Views[key];
-      return `<div class="menu-item ${key === active ? 'active' : ''}" data-key="${key}">
-        ${MEVPS.icon(v.icon, 18)}<span>${v.label}</span>
+    document.getElementById('side-menu').innerHTML =
+      MENU.map((key) => {
+        const v = Views[key];
+        return `<div class="menu-item ${key === active ? 'active' : ''}" data-key="${key}">
+          ${MEVPS.icon(v.icon, 18)}<span>${v.label}</span>
+        </div>`;
+      }).join('') +
+      `<div class="menu-item menu-item-logout" data-key="logout">
+        ${MEVPS.icon('logout', 18)}<span>退出登录</span>
       </div>`;
-    }).join('');
     document.getElementById('side-menu').onclick = (e) => {
       const item = e.target.closest('.menu-item[data-key]');
-      if (item) location.hash = '#/' + item.dataset.key;
+      if (!item) return;
+      if (item.dataset.key === 'logout') return MEVPS.logout();
+      location.hash = '#/' + item.dataset.key;
     };
   }
 

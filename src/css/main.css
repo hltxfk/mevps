@@ -189,6 +189,8 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .menu-item:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 .menu-item.active { background: var(--primary); color: #fff; }
 .menu-item svg { flex-shrink: 0; }
+.menu-item-logout { margin-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.1); color: rgba(255, 120, 117, 0.92); }
+.menu-item-logout:hover { background: rgba(245, 34, 45, 0.16); color: #ff7875; }
 
 .layout-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .header {
