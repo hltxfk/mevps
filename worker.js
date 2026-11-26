@@ -190,6 +190,16 @@ async function initDb(env) {
     'CREATE INDEX IF NOT EXISTS idx_vps_status ON vps(status)',
   ].map((sql) => db.prepare(sql)));
 
+  // 迁移：早期单一 gh_token_enc → 双 Token 槽（旧值并入 classic）
+  const legacyToken = await db.prepare("SELECT value FROM settings WHERE key = 'gh_token_enc'").first();
+  if (legacyToken && legacyToken.value) {
+    await db
+      .prepare("INSERT INTO settings (key, value) VALUES ('gh_token_classic_enc', ?) ON CONFLICT(key) DO NOTHING")
+      .bind(legacyToken.value)
+      .run();
+    await db.prepare("DELETE FROM settings WHERE key = 'gh_token_enc'").run();
+  }
+
   // ---- settings：所有"变量"都存这里 ----
   const secretRow = await db.prepare('SELECT value FROM settings WHERE key = ?').bind('token_secret').first();
   if (!secretRow) {
@@ -574,13 +584,17 @@ async function handleApi(request, env, url) {
   if (path === '/api/actions' && method === 'GET') {
     const repo = await getSetting(db, 'gh_repo', '');
     const evt = await getSetting(db, 'gh_event', 'vps-sync');
-    const tokenEnc = await getSetting(db, 'gh_token_enc', '');
+    const hasClassic = !!(await getSetting(db, 'gh_token_classic_enc', ''));
+    const hasFine = !!(await getSetting(db, 'gh_token_fine_enc', ''));
+    const activeType = (await getSetting(db, 'gh_token_type', 'classic')) === 'fine' ? 'fine' : 'classic';
     const cbSet = !!(await getSetting(db, 'sync_callback_secret', ''));
     const { source } = await resolveEncKey(env);
     return ok({
       repo,
       event: evt,
-      has_token: !!tokenEnc,
+      has_classic: hasClassic,
+      has_fine: hasFine,
+      active_type: activeType,
       callback_set: cbSet,
       enc_source: source,
     });
@@ -596,11 +610,19 @@ async function handleApi(request, env, url) {
       batch.push(up.bind('gh_repo', repo.slice(0, 100)));
     }
     if (typeof b.gh_event === 'string' && b.gh_event.trim()) batch.push(up.bind('gh_event', b.gh_event.trim().slice(0, 60)));
-    // Token 仅在非空时更新：前端不回显，留空即保持原有值，避免误清空。
-    if (typeof b.gh_token === 'string' && b.gh_token.trim()) {
-      const enc = await encSecret(env, b.gh_token.trim());
-      if (!enc) return err('Token 加密失败，请检查 SSH_ENC_KEY 配置');
-      batch.push(up.bind('gh_token_enc', enc));
+    // 双 Token 槽：仅在非空时更新，留空即保持原有值，避免误清空。
+    if (typeof b.gh_token_classic === 'string' && b.gh_token_classic.trim()) {
+      const enc = await encSecret(env, b.gh_token_classic.trim());
+      if (!enc) return err('Classic Token 加密失败，请检查 SSH_ENC_KEY 配置');
+      batch.push(up.bind('gh_token_classic_enc', enc));
+    }
+    if (typeof b.gh_token_fine === 'string' && b.gh_token_fine.trim()) {
+      const enc = await encSecret(env, b.gh_token_fine.trim());
+      if (!enc) return err('细粒度 Token 加密失败，请检查 SSH_ENC_KEY 配置');
+      batch.push(up.bind('gh_token_fine_enc', enc));
+    }
+    if (typeof b.gh_token_type === 'string' && ['classic', 'fine'].includes(b.gh_token_type)) {
+      batch.push(up.bind('gh_token_type', b.gh_token_type));
     }
     if (b.reset_callback === true) batch.push(up.bind('sync_callback_secret', randomHex(32)));
     if (!batch.length) return err('没有需要保存的内容');

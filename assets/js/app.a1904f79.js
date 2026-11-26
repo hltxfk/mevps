@@ -600,13 +600,22 @@ Views.vps = {
           <input class="input" id="a-repo" value="${MEVPS.esc(cfg.repo || '')}" placeholder="如 hltxfk/mevps" spellcheck="false" autocomplete="off" /></label>
         <label class="field"><span class="field-label">触发事件类型</span>
           <input class="input" id="a-event" value="${MEVPS.esc(cfg.event || 'vps-sync')}" placeholder="vps-sync" spellcheck="false" autocomplete="off" /></label>
-        <label class="field"><span class="field-label">GitHub Token</span>
-          <input class="input" id="a-token" type="password" value="" autocomplete="off" spellcheck="false"
-            placeholder="${cfg.has_token ? '已配置，留空保持不变' : '粘贴 PAT（classic 或细粒度）'}" /></label>
+        <label class="field"><span class="field-label">启用哪个 Token</span>
+          <select class="select" id="a-token-type">
+            <option value="classic" ${cfg.active_type !== 'fine' ? 'selected' : ''}>Classic PAT（repo 权限）</option>
+            <option value="fine" ${cfg.active_type === 'fine' ? 'selected' : ''}>细粒度 PAT（仅 Actions: write）</option>
+          </select></label>
+        <label class="field"><span class="field-label">Classic Token</span>
+          <input class="input" id="a-token-classic" type="password" value="" autocomplete="off" spellcheck="false"
+            placeholder="${cfg.has_classic ? '已配置，留空保持不变' : 'ghp_... （需勾 repo 权限）'}" /></label>
+        <label class="field"><span class="field-label">细粒度 Token</span>
+          <input class="input" id="a-token-fine" type="password" value="" autocomplete="off" spellcheck="false"
+            placeholder="${cfg.has_fine ? '已配置，留空保持不变' : 'github_pat_... （仅 Actions: write）'}" /></label>
         <div class="field span-2">
           <p class="muted" style="font-size:12px;line-height:1.9;margin:0">
             ${MEVPS.icon('info', 13)} Token 仅用于调用 GitHub API 触发 Actions（<code>repository_dispatch</code>）。<br/>
-            ${MEVPS.icon('info', 13)} Classic PAT 需勾选 <code>repo</code> 权限（私有仓库必需）；细粒度 PAT 仅需 <code>Actions: write</code>。<br/>
+            ${MEVPS.icon('check', 13)} 两个 Token 可<strong>同时保存</strong>，用「启用哪个 Token」随时切换，互不影响。<br/>
+            ${MEVPS.icon('info', 13)} Classic PAT 需勾 <code>repo</code>（私有仓库必需，范围较广）；细粒度 PAT 仅需 <code>Actions: write</code>。<br/>
             ${MEVPS.icon('check', 13)} 保存后 Token 以 <strong>AES-256-GCM</strong> 加密落库，界面永不回显明文，日志不打印。<br/>
             ${MEVPS.icon('info', 13)} 加密密钥来源：<code>${cfg.enc_source === 'secret' ? 'SSH_ENC_KEY（Cloudflare Secret）' : 'D1 settings 表'}</code>
           </p>
@@ -618,15 +627,21 @@ Views.vps = {
       content,
       okText: '保 存',
       onOk(overlay, close) {
-        const repo = overlay.querySelector('#a-repo').value.trim();
-        const event = overlay.querySelector('#a-event').value.trim() || 'vps-sync';
-        const token = overlay.querySelector('#a-token').value.trim();
+        const g = (id) => overlay.querySelector('#' + id).value.trim();
+        const repo = g('a-repo');
         if (!repo) {
           MEVPS.toast('请填写 GitHub 仓库（owner/repo）', 'error');
           return false;
         }
-        const body = { gh_repo: repo, gh_event: event };
-        if (token) body.gh_token = token;
+        const body = {
+          gh_repo: repo,
+          gh_event: g('a-event') || 'vps-sync',
+          gh_token_type: overlay.querySelector('#a-token-type').value,
+        };
+        const classic = g('a-token-classic');
+        const fine = g('a-token-fine');
+        if (classic) body.gh_token_classic = classic;
+        if (fine) body.gh_token_fine = fine;
         MEVPS.api('/actions', { method: 'PUT', body })
           .then(() => {
             MEVPS.toast('SSH 设置已保存', 'success');
