@@ -978,6 +978,26 @@ Views.settings = {
     MEVPS.toast('登录已过期，请重新登录', 'error');
   });
 
+  /* ---------------- 登录页装饰交互（选项卡 / 快捷角色 / 第三方） ---------------- */
+  MEVPS.$$('.login-tab').forEach((t) => {
+    t.addEventListener('click', () => {
+      if (t.classList.contains('active')) return;
+      MEVPS.$$('.login-tab').forEach((x) => x.classList.remove('active'));
+      t.classList.add('active');
+      MEVPS.toast('演示环境仅开放密码登录', 'info');
+    });
+  });
+  MEVPS.$$('.quick-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.getElementById('login-username').value = 'admin';
+      document.getElementById('login-password').value = '123456';
+      MEVPS.toast('已选择「' + b.dataset.role + '」演示账号', 'info');
+      document.getElementById('login-form').requestSubmit();
+    });
+  });
+  MEVPS.$$('.social').forEach((s) => s.addEventListener('click', () => MEVPS.toast('演示环境暂未开放第三方登录', 'info')));
+  MEVPS.$$('.login-icon-btn').forEach((s) => s.addEventListener('click', () => MEVPS.toast('演示环境暂未开放该功能', 'info')));
+
   /* ---------------- 启动 ---------------- */
   (async function boot() {
     if (!MEVPS.getToken()) {
