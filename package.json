@@ -1,0 +1,26 @@
+{
+  "name": "mevps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MEVPS —— 基于 Cloudflare Workers + D1 的轻量 VPS 服务器管理面板（SoybeanAdmin 风格主题）",
+  "cloudflare": {
+    "label": "MEVPS 服务器管理面板",
+    "products": ["Workers", "D1"],
+    "categories": ["admin-panel"],
+    "docs_url": "https://github.com/soybeanjs/soybean-admin",
+    "publish": false,
+    "bindings": {
+      "db": {
+        "description": "D1 数据库。绑定变量名固定为 `db`，数据库默认名为 `mymail`（部署时自动创建，首次请求自动建表）。"
+      }
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && wrangler dev",
+    "deploy": "node build.mjs && wrangler deploy"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

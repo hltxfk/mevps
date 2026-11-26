@@ -1,0 +1,28 @@
+{
+  "name": "mevps",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-26",
+  "observability": {
+    "enabled": true
+  },
+  // 静态资源：assets/ 目录（构建产物）由 Cloudflare 边缘直接响应
+  // - 命中静态资源的请求不进入 Worker，不消耗请求额度
+  // - 仅 /api/* 先进入 Worker 脚本处理
+  // - 其余未命中的路径按单页应用回退到 index.html
+  "assets": {
+    "directory": "./assets",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  // D1 数据库：绑定变量名固定为 db，数据库默认名为 mymail
+  // 通过 Cloudflare 控制台 / Deploy 按钮部署时会自动创建并绑定；
+  // database_id 为占位值，自动创建时会被替换为你账号下的实际 ID（CLI 部署请填自己的 ID）。
+  "d1_databases": [
+    {
+      "binding": "db",
+      "database_name": "mymail",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}

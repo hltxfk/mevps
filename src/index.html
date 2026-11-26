@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="buildTime" content="{{BUILD_TIME}}" />
+    <link rel="icon" href="/favicon.svg" />
+    <title>MEVPS · 服务器管理面板</title>
+    <!--{{CSS}}-->
+  </head>
+  <body>
+    <!-- ============ 登录页 ============ -->
+    <div id="login-page" class="login-page">
+      <div class="login-brand">
+        <div class="login-blob blob-1"></div>
+        <div class="login-blob blob-2"></div>
+        <div class="login-brand-inner">
+          <div class="login-brand-logo">
+            <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><circle cx="6.5" cy="6.5" r=".8" fill="#fff"/><circle cx="6.5" cy="17.5" r=".8" fill="#fff"/><path d="M10 6.5h8M10 17.5h8"/></svg>
+          </div>
+          <h1>MEVPS</h1>
+          <p class="login-brand-sub">轻量 · 优雅 · 部署在 Cloudflare 边缘的 VPS 服务器管理面板</p>
+          <ul class="login-brand-list">
+            <li>✦ SoybeanAdmin 风格主题面板</li>
+            <li>✦ 静态资源边缘直出，不耗 Worker 额度</li>
+            <li>✦ D1 自动初始化，变量全部入库</li>
+          </ul>
+        </div>
+        <div class="login-brand-foot">Powered by Cloudflare Workers &amp; D1</div>
+      </div>
+      <div class="login-form-side">
+        <form id="login-form" class="login-card" autocomplete="off">
+          <h2>登录到管理面板</h2>
+          <p class="login-tip">请输入账号信息以继续</p>
+          <label class="field">
+            <span class="field-label">用户名</span>
+            <div class="input-wrap">
+              <svg class="input-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              <input id="login-username" name="username" type="text" placeholder="用户名" value="admin" required />
+            </div>
+          </label>
+          <label class="field">
+            <span class="field-label">密码</span>
+            <div class="input-wrap">
+              <svg class="input-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <input id="login-password" name="password" type="password" placeholder="密码" value="123456" required />
+            </div>
+          </label>
+          <div class="login-row">
+            <label class="checkbox"><input id="login-remember" type="checkbox" checked /><span>记住我</span></label>
+            <a class="link" href="javascript:void(0)" onclick="return false">忘记密码？</a>
+          </div>
+          <button id="login-btn" class="btn btn-primary btn-block" type="submit">登 录</button>
+          <p class="login-hint">默认账号：<code>admin</code> / <code>123456</code>，登录后请在「系统设置」中修改</p>
+        </form>
+      </div>
+    </div>
+
+    <!-- ============ 主框架 ============ -->
+    <div id="app-layout" class="layout hidden">
+      <aside class="sider" id="sider">
+        <div class="logo">
+          <div class="logo-mark">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><circle cx="6.5" cy="6.5" r=".8" fill="#fff"/><circle cx="6.5" cy="17.5" r=".8" fill="#fff"/><path d="M10 6.5h8M10 17.5h8"/></svg>
+          </div>
+          <span class="logo-text">MEVPS</span>
+        </div>
+        <nav class="menu" id="side-menu"></nav>
+      </aside>
+
+      <div class="layout-main">
+        <header class="header">
+          <div class="header-left">
+            <button class="icon-btn" id="collapse-btn" title="折叠菜单">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <nav class="breadcrumb" id="breadcrumb"><span>首页</span><i>/</i><b id="breadcrumb-current">数据仪表盘</b></nav>
+          </div>
+          <div class="header-right">
+            <div class="user-chip" id="user-chip">
+              <div class="avatar" id="user-avatar">A</div>
+              <span id="user-name">admin</span>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              <div class="dropdown" id="user-dropdown">
+                <div class="dropdown-item" id="menu-profile">个人信息</div>
+                <div class="dropdown-item" id="menu-settings">系统设置</div>
+                <div class="dropdown-divider"></div>
+                <div class="dropdown-item danger" id="menu-logout">退出登录</div>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <div class="tabs-bar" id="tabs-bar"></div>
+        <main class="content" id="view-container"></main>
+      </div>
+    </div>
+
+    <div id="toast-root"></div>
+    <div id="modal-root"></div>
+    <!--{{JS}}-->
+  </body>
+</html>
