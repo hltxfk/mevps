@@ -77,6 +77,70 @@ async function verifyToken(secret, token) {
   }
 }
 
+function bytesToB64url(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlToBytes(s) {
+  const t = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(t + '='.repeat((4 - (t.length % 4)) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/* --------------------- 凭据加密（AES-256-GCM） ---------------------
+ * 用途：GitHub Actions 触发 Token 等敏感凭据落库前加密。
+ * 密钥优先取 Cloudflare Secret 环境变量 SSH_ENC_KEY（base64url 32 字节）；
+ * 未配置时退而在 D1 settings 自动生成 enc_key（仅混淆，不等于加密），
+ * 生产环境请务必 wrangler secret put SSH_ENC_KEY。 */
+const ENC_PREFIX = 'enc.v1.';
+
+async function importEncKey(rawB64) {
+  return crypto.subtle.importKey('raw', b64urlToBytes(rawB64), 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+async function resolveEncKey(env) {
+  if (env && env.SSH_ENC_KEY) {
+    return { key: await importEncKey(String(env.SSH_ENC_KEY).trim()), source: 'secret' };
+  }
+  const db = env.db;
+  let row = await db.prepare('SELECT value FROM settings WHERE key = ?').bind('enc_key').first();
+  if (!row || !row.value) {
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    const b64 = bytesToB64url(arr.buffer);
+    await db
+      .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .bind('enc_key', b64)
+      .run();
+    row = { value: b64 };
+  }
+  return { key: await importEncKey(row.value), source: 'd1' };
+}
+
+async function encSecret(env, plaintext) {
+  if (!plaintext) return '';
+  const { key } = await resolveEncKey(env);
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(String(plaintext)));
+  return ENC_PREFIX + bytesToB64url(iv.buffer) + '.' + bytesToB64url(ct);
+}
+
+async function decSecret(env, blob) {
+  if (!blob || !String(blob).startsWith(ENC_PREFIX)) return '';
+  const parts = String(blob).slice(ENC_PREFIX.length).split('.');
+  if (parts.length !== 2) return '';
+  const { key } = await resolveEncKey(env);
+  try {
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlToBytes(parts[0]) }, key, b64urlToBytes(parts[1]));
+    return new TextDecoder().decode(pt);
+  } catch {
+    return '';
+  }
+}
+
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -503,6 +567,46 @@ async function handleApi(request, env, url) {
       await addLog(db, target, '修改', '账号', '修改登录密码', ip);
     }
     return ok({ username: target });
+  }
+
+  // —— GitHub Actions 集成配置（SSH 执行器触发端）——
+  // 安全约定：Token 只写不读，接口永不回显明文或任何片段。
+  if (path === '/api/actions' && method === 'GET') {
+    const repo = await getSetting(db, 'gh_repo', '');
+    const evt = await getSetting(db, 'gh_event', 'vps-sync');
+    const tokenEnc = await getSetting(db, 'gh_token_enc', '');
+    const cbSet = !!(await getSetting(db, 'sync_callback_secret', ''));
+    const { source } = await resolveEncKey(env);
+    return ok({
+      repo,
+      event: evt,
+      has_token: !!tokenEnc,
+      callback_set: cbSet,
+      enc_source: source,
+    });
+  }
+
+  if (path === '/api/actions' && method === 'PUT') {
+    const b = await request.json().catch(() => ({}));
+    const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+    const batch = [];
+    if (typeof b.gh_repo === 'string') {
+      const repo = b.gh_repo.trim();
+      if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) return err('GitHub 仓库格式应为 owner/repo');
+      batch.push(up.bind('gh_repo', repo.slice(0, 100)));
+    }
+    if (typeof b.gh_event === 'string' && b.gh_event.trim()) batch.push(up.bind('gh_event', b.gh_event.trim().slice(0, 60)));
+    // Token 仅在非空时更新：前端不回显，留空即保持原有值，避免误清空。
+    if (typeof b.gh_token === 'string' && b.gh_token.trim()) {
+      const enc = await encSecret(env, b.gh_token.trim());
+      if (!enc) return err('Token 加密失败，请检查 SSH_ENC_KEY 配置');
+      batch.push(up.bind('gh_token_enc', enc));
+    }
+    if (b.reset_callback === true) batch.push(up.bind('sync_callback_secret', randomHex(32)));
+    if (!batch.length) return err('没有需要保存的内容');
+    await db.batch(batch);
+    await addLog(db, username, '设置', 'SSH 设置', `更新 Actions 集成配置（${batch.length} 项）`, ip);
+    return ok({});
   }
 
   return err('接口不存在', 404);

@@ -41,6 +41,7 @@ MEVPS.ICONS = {
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>',
 };
 
 MEVPS.icon = (name, size = 16, stroke = 2) =>
@@ -430,6 +431,7 @@ Views.vps = {
             <button class="btn btn-danger btn-sm" id="vps-batch-del" disabled>${MEVPS.icon('trash', 14)} 批量删除</button>
             <div class="spacer"></div>
             <button class="btn btn-primary btn-sm" id="vps-add">${MEVPS.icon('plus', 14)} 新增 VPS</button>
+            <button class="btn btn-sm" id="vps-ssh-cfg" title="配置 GitHub Actions 触发凭据">${MEVPS.icon('key', 14)} SSH设置</button>
           </div>
           <div class="table-wrap">
             <table class="table">
@@ -460,6 +462,7 @@ Views.vps = {
     });
     MEVPS.$('#vps-refresh').addEventListener('click', () => this.load());
     MEVPS.$('#vps-add').addEventListener('click', () => this.openForm());
+    MEVPS.$('#vps-ssh-cfg').addEventListener('click', () => this.openActionsCfg());
     const tbodyEl = MEVPS.$('#vps-tbody');
     MEVPS.$('#vps-check-all').addEventListener('change', (e) => {
       MEVPS.$$('.row-check', tbodyEl).forEach((b) => {
@@ -581,6 +584,58 @@ Views.vps = {
     } catch (e) {
       MEVPS.toast(e.message, 'error');
     }
+  },
+
+  /* ---- SSH 设置：配置 GitHub Actions 触发凭据（Token 加密存储、不回显） ---- */
+  async openActionsCfg() {
+    let cfg;
+    try {
+      cfg = await MEVPS.api('/actions');
+    } catch (e) {
+      return MEVPS.toast(e.message, 'error');
+    }
+    const content = `
+      <div class="form-grid">
+        <label class="field span-2"><span class="field-label required">GitHub 仓库（Actions 所在仓库）</span>
+          <input class="input" id="a-repo" value="${MEVPS.esc(cfg.repo || '')}" placeholder="如 hltxfk/mevps" spellcheck="false" autocomplete="off" /></label>
+        <label class="field"><span class="field-label">触发事件类型</span>
+          <input class="input" id="a-event" value="${MEVPS.esc(cfg.event || 'vps-sync')}" placeholder="vps-sync" spellcheck="false" autocomplete="off" /></label>
+        <label class="field"><span class="field-label">GitHub Token</span>
+          <input class="input" id="a-token" type="password" value="" autocomplete="off" spellcheck="false"
+            placeholder="${cfg.has_token ? '已配置，留空保持不变' : 'ghp_xxx 或细粒度 PAT'}" /></label>
+        <div class="field span-2">
+          <p class="muted" style="font-size:12px;line-height:1.9;margin:0">
+            ${MEVPS.icon('info', 13)} Token 仅用于调用 GitHub API 触发 Actions（<code>repository_dispatch</code>）。<br/>
+            ${MEVPS.icon('check', 13)} 建议用<strong>细粒度 PAT</strong>，只授该仓库的 <code>Actions: write</code>；切勿用全权限 classic PAT。<br/>
+            ${MEVPS.icon('check', 13)} 保存后 Token 以 <strong>AES-256-GCM 加密</strong>落库，界面永不回显明文。<br/>
+            ${MEVPS.icon(cfg.enc_source === 'secret' ? 'check' : 'info', 13)} 加密密钥来源：<code>${cfg.enc_source === 'secret' ? 'SSH_ENC_KEY（Cloudflare Secret，安全）' : 'D1 自生成（仅混淆，建议配置 SSH_ENC_KEY）'}</code>
+          </p>
+        </div>
+      </div>`;
+
+    MEVPS.modal({
+      title: 'SSH 设置 · GitHub Actions 触发凭据',
+      content,
+      okText: '保 存',
+      onOk(overlay, close) {
+        const repo = overlay.querySelector('#a-repo').value.trim();
+        const event = overlay.querySelector('#a-event').value.trim() || 'vps-sync';
+        const token = overlay.querySelector('#a-token').value.trim();
+        if (!repo) {
+          MEVPS.toast('请填写 GitHub 仓库（owner/repo）', 'error');
+          return false;
+        }
+        const body = { gh_repo: repo, gh_event: event };
+        if (token) body.gh_token = token;
+        MEVPS.api('/actions', { method: 'PUT', body })
+          .then(() => {
+            MEVPS.toast('SSH 设置已保存', 'success');
+            close();
+          })
+          .catch((e) => MEVPS.toast(e.message, 'error'));
+        return false;
+      },
+    });
   },
 
   openForm(item) {
