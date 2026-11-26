@@ -345,6 +345,18 @@ async function handleApi(request, env, url) {
     return ok({ id: r.meta.last_row_id });
   }
 
+  // 批量删除 VPS
+  if (path === '/api/vps/batch-delete' && method === 'POST') {
+    const b = await request.json().catch(() => ({}));
+    const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (!ids.length) return err('请选择要删除的记录');
+    const del = db.prepare('DELETE FROM vps WHERE id = ?');
+    const results = await db.batch(ids.map((id) => del.bind(id)));
+    const deleted = results.reduce((s, r) => s + ((r && r.meta && r.meta.changes) || 0), 0);
+    await addLog(db, username, '删除', 'VPS', `批量删除 VPS 记录（#${ids.join('、#')}）`, ip);
+    return ok({ deleted });
+  }
+
   // 单个 VPS 操作：修改 / 删除 / 启停
   const m = path.match(/^\/api\/vps\/(\d+)$/);
   const ma = path.match(/^\/api\/vps\/(\d+)\/action$/);
@@ -420,6 +432,18 @@ async function handleApi(request, env, url) {
       .bind(...args, pageSize, (page - 1) * pageSize)
       .all();
     return ok({ list: list.results || [], total: totalRow ? totalRow.c : 0, page, pageSize });
+  }
+
+  // 批量删除操作日志
+  if (path === '/api/logs/batch-delete' && method === 'POST') {
+    const b = await request.json().catch(() => ({}));
+    const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (!ids.length) return err('请选择要删除的日志');
+    const del = db.prepare('DELETE FROM logs WHERE id = ?');
+    const results = await db.batch(ids.map((id) => del.bind(id)));
+    const deleted = results.reduce((s, r) => s + ((r && r.meta && r.meta.changes) || 0), 0);
+    await addLog(db, username, '删除', '操作日志', `批量删除 ${deleted} 条操作日志（#${ids.join('、#')}）`, ip);
+    return ok({ deleted });
   }
 
   // 系统设置（所有变量都保存在 D1 settings 表）

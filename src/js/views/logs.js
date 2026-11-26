@@ -4,7 +4,7 @@ window.Views = window.Views || {};
 Views.logs = {
   label: '操作日志',
   icon: 'log',
-  state: { page: 1, pageSize: 12, keyword: '', action: '' },
+  state: { page: 1, pageSize: 12, keyword: '', action: '', selected: new Set() },
 
   async render(container) {
     const st = this.state;
@@ -27,13 +27,14 @@ Views.logs = {
               <option value="设置">设置</option>
             </select>
             <button class="btn btn-sm" id="log-refresh">${MEVPS.icon('refresh', 14)} 刷新</button>
+            <button class="btn btn-danger btn-sm" id="log-batch-del" disabled>${MEVPS.icon('trash', 14)} 批量删除</button>
           </div>
           <div class="table-wrap">
             <table class="table">
               <thead>
-                <tr><th>ID</th><th>时间</th><th>操作人</th><th>类型</th><th>目标</th><th>详情</th><th>IP</th><th>结果</th></tr>
+                <tr><th class="col-check"><input type="checkbox" id="log-check-all" title="全选 / 取消全选" /></th><th>ID</th><th>时间</th><th>操作人</th><th>类型</th><th>目标</th><th>详情</th><th>IP</th><th>结果</th></tr>
               </thead>
-              <tbody id="log-tbody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+              <tbody id="log-tbody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
             </table>
           </div>
           <div class="pagination" id="log-pagination"></div>
@@ -52,6 +53,25 @@ Views.logs = {
       this.load();
     });
     MEVPS.$('#log-refresh').addEventListener('click', () => this.load());
+    const tbodyEl = MEVPS.$('#log-tbody');
+    MEVPS.$('#log-check-all').addEventListener('change', (e) => {
+      MEVPS.$$('.row-check', tbodyEl).forEach((b) => {
+        b.checked = e.target.checked;
+        const id = Number(b.dataset.id);
+        if (e.target.checked) st.selected.add(id);
+        else st.selected.delete(id);
+      });
+      this.updateBatchUI();
+    });
+    tbodyEl.addEventListener('change', (e) => {
+      const b = e.target.closest('.row-check');
+      if (!b) return;
+      const id = Number(b.dataset.id);
+      if (b.checked) st.selected.add(id);
+      else st.selected.delete(id);
+      this.updateBatchUI();
+    });
+    MEVPS.$('#log-batch-del').addEventListener('click', () => this.batchDelete());
     this.load();
   },
 
@@ -70,6 +90,7 @@ Views.logs = {
     tbody.innerHTML =
       res.list.map((l) => `
         <tr>
+          <td class="col-check"><input type="checkbox" class="row-check" data-id="${l.id}" ${st.selected.has(l.id) ? 'checked' : ''} /></td>
           <td class="muted">#${l.id}</td>
           <td class="muted">${MEVPS.fmtTime(l.created_at)}</td>
           <td><b>${MEVPS.esc(l.username)}</b></td>
@@ -78,7 +99,7 @@ Views.logs = {
           <td class="muted">${MEVPS.esc(l.detail)}</td>
           <td><code>${MEVPS.esc(l.ip || '-')}</code></td>
           <td>${l.status === 'fail' ? '<span class="tag tag-error">失败</span>' : '<span class="tag tag-success">成功</span>'}</td>
-        </tr>`).join('') || '<tr><td colspan="8" class="empty">暂无日志</td></tr>';
+        </tr>`).join('') || '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
 
     MEVPS.pager(MEVPS.$('#log-pagination'), {
       page: res.page,
@@ -89,5 +110,33 @@ Views.logs = {
         this.load();
       },
     });
+
+    this.updateBatchUI();
+  },
+
+  /* 同步批量删除按钮与表头全选状态 */
+  updateBatchUI() {
+    const btn = MEVPS.$('#log-batch-del');
+    const tbody = MEVPS.$('#log-tbody');
+    if (!btn || !tbody) return;
+    const n = this.state.selected.size;
+    btn.disabled = n === 0;
+    btn.innerHTML = `${MEVPS.icon('trash', 14)} 批量删除${n ? `（${n}）` : ''}`;
+    MEVPS.syncCheckAll(MEVPS.$('#log-check-all'), tbody, this.state.selected);
+  },
+
+  async batchDelete() {
+    const st = this.state;
+    const ids = [...st.selected];
+    if (!ids.length) return MEVPS.toast('请先勾选要删除的日志', 'info');
+    if (!(await MEVPS.confirm(`确定删除选中的 ${ids.length} 条操作日志吗？此操作不可恢复。`))) return;
+    try {
+      const r = await MEVPS.api('/logs/batch-delete', { method: 'POST', body: { ids } });
+      MEVPS.toast(`已删除 ${r.deleted} 条`, 'success');
+      st.selected.clear();
+      this.load();
+    } catch (e) {
+      MEVPS.toast(e.message, 'error');
+    }
   },
 };
