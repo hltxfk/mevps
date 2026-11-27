@@ -372,3 +372,16 @@ table.table { width: 100%; border-collapse: collapse; }
 
 /* ---- 统一控件样式（textarea 除外）：高度 32px、圆角 6px 与按钮一致 ---- */
 .input:not(textarea), .select, .btn-sm, .toolbar .input, .toolbar .select { height: 32px; border-radius: 6px; }
+
+/* ---- 浏览器内 SSH 终端 ---- */
+.term-shell { display: flex; flex-direction: column; gap: 8px; }
+.term-status { font-size: 12px; color: #8a8f98; padding: 2px 4px; }
+.term-status.err { color: #f5222d; }
+.term-box {
+  height: 440px;
+  background: #1e1e2e;
+  border-radius: 8px;
+  padding: 8px 4px 4px 8px;
+  overflow: hidden;
+}
+.term-box .xterm { height: 100%; }

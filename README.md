@@ -10,7 +10,7 @@
 | 菜单 | 功能 |
 | --- | --- |
 | 📊 数据仪表盘 | VPS 总数 / 运行 / 停止 / 月度成本统计卡片、近 7 天成本趋势图、状态分布环形图、最近操作、系统信息 |
-| 🖥 VPS管理 | VPS 记录增删改查、搜索 / 状态筛选、分页、启动 / 停止、到期提醒 |
+| 🖥 VPS管理 | VPS 记录增删改查、搜索 / 状态筛选、分页、启动 / 停止、到期提醒、**浏览器内 SSH 终端** |
 | 📝 操作日志 | 登录与所有变更操作的审计日志，按类型 / 关键字筛选、分页 |
 | ⚙ 系统设置 | 站点名称 / 描述 / 会话有效期、修改用户名密码（变量全部存 D1） |
 
@@ -27,6 +27,21 @@
    `wrangler.jsonc` 中 `assets.run_worker_first = ["/api/*"]`，只有 `/api/*` 会进入 Worker（API 与鉴权），其余请求由静态资源层直接处理。
 
 数据存储：**D1**，绑定变量名固定为 **`db`**，数据库默认名为 **`mevps`**。所有"变量 / 配置"全部写入 D1 的 `settings` 表（不使用环境变量）；表结构与默认账号在**首次 API 请求时自动初始化**，无需手动执行 SQL。
+
+## 🖥 浏览器内 SSH 终端
+
+VPS 列表「获取配置」旁的「**终端**」按钮可直接在浏览器里打开 SSH 交互终端，无需安装任何客户端：
+
+```
+浏览器 xterm.js  ←WebSocket→  Cloudflare Worker（内置 SSH 客户端）  ←TCP→  VPS:22
+```
+
+- **零代理部署**：不需要在 VPS 上装任何东西，用面板里已保存的 SSH 凭据（密码 / 私钥）直接连接；
+- **安全**：WebSocket 握手用 5 分钟一次性 HMAC 票据（Token 不进 URL）；主机密钥严格验签（ed25519 / ecdsa / rsa-sha2 全支持），失败立即中止；每次打开终端记入操作日志；
+- **协议**：curve25519-sha256 / ecdh-sha2-nistp256 密钥交换，aes128/256-gcm 加密，支持严格 KEX（防 Terrapin）；
+- **完整交互**：PTY、窗口自适应缩放（window-change）、密码 / 私钥认证（OpenSSH 格式 ed25519 / rsa / ecdsa；带口令加密的私钥暂不支持）。
+
+> 终端流量由 Worker 的出站 TCP（`cloudflare:sockets`）承载，与 GitHub Actions 同步通道互不影响。
 
 ## 🚀 部署一：Cloudflare 控制台（浏览器操作，推荐）
 
@@ -65,7 +80,7 @@ npx wrangler deploy   # 不写 database_id，部署时自动创建 D1「mevps」
 
 ```
 mevps/
-├── worker.js            # Worker 单文件（/api/* 路由 + D1 自动初始化 + 鉴权）
+├── worker.js            # Worker 单文件（/api/* 路由 + D1 自动初始化 + 鉴权 + SSH 迷你客户端 + 终端 WS 网关）
 ├── wrangler.jsonc       # 部署配置（assets + run_worker_first + D1 绑定 db）
 ├── package.json         # build/deploy 脚本 + Cloudflare 资源声明
 ├── build.mjs            # 前端构建：拼接 + 内容哈希文件名 → assets/
@@ -73,6 +88,7 @@ mevps/
 │   ├── index.html       # 入口（登录页 + 主框架）
 │   ├── css/main.css     # 主题样式（NaiveUI 设计语言）
 │   ├── js/              # 模块：utils / api / ui / charts / views/* / app
+│   ├── vendor/          # 第三方组件：xterm.js（浏览器 SSH 终端）
 │   ├── _headers         # 缓存与安全响应头规则
 │   └── favicon.svg
 └── assets/              # 构建产物（部署目录，已提交，可直接上传）

@@ -57,6 +57,14 @@ html = html
   .replace('{{BUILD_TIME}}', new Date().toISOString().replace('T', ' ').slice(0, 19));
 writeFileSync(join(out, 'index.html'), html);
 
+// ---- 第三方静态资源（xterm.js 浏览器终端组件）----
+const VENDOR = [
+  ['vendor/xterm-5.3.0.min.js', 'js'],
+  ['vendor/xterm-addon-fit-0.8.0.min.js', 'js'],
+  ['vendor/xterm-5.3.0.min.css', 'css'],
+];
+for (const [f, dir] of VENDOR) copyFileSync(join(src, f), join(out, dir, f.split('/').pop()));
+
 // ---- 静态文件 ----
 copyFileSync(join(src, '_headers'), join(out, '_headers'));
 copyFileSync(join(src, 'favicon.svg'), join(out, 'favicon.svg'));
@@ -65,4 +73,5 @@ console.log('✅ 构建完成 → assets/');
 console.log(`   index.html`);
 console.log(`   js/${jsName}   (${(jsBuf.length / 1024).toFixed(1)} KB)`);
 console.log(`   css/${cssName}  (${(cssBuf.length / 1024).toFixed(1)} KB)`);
+console.log('   js/xterm-5.3.0.min.js / xterm-addon-fit-0.8.0.min.js / css/xterm-5.3.0.min.css');
 console.log('   _headers / favicon.svg');

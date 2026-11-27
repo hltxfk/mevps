@@ -158,7 +158,7 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
   };
 
   /* ---- Modal ---- */
-  MEVPS.modal = function ({ title, content, okText = '确 定', cancelText = '取 消', onOk, hideFooter = false, width }) {
+  MEVPS.modal = function ({ title, content, okText = '确 定', cancelText = '取 消', onOk, onClose, hideFooter = false, width }) {
     const root = document.getElementById('modal-root');
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -173,7 +173,7 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
       </div>`;
     root.appendChild(overlay);
 
-    const close = () => overlay.remove();
+    const close = () => { if (onClose) onClose(); overlay.remove(); };
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) close();
       const act = e.target.closest('[data-act]');
@@ -479,7 +479,7 @@ Views.vps = {
                 <tr>
                   <th class="col-check"><input type="checkbox" id="vps-check-all" title="全选 / 取消全选" /></th>
                   <th>ID</th><th>名称</th><th>IP 地址</th><th>配置</th>
-                  <th>添加时间</th><th>同步状态</th><th style="width:220px">操作</th>
+                  <th>添加时间</th><th>同步状态</th><th style="width:260px">操作</th>
                 </tr>
               </thead>
               <tbody id="vps-tbody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
@@ -556,6 +556,7 @@ Views.vps = {
           <td>${syncTag[v.sync_status] || MEVPS.esc(v.sync_status)}${v.sync_error ? `<div class="muted" style="font-size:11px">${MEVPS.esc(v.sync_error)}</div>` : ''}</td>
           <td class="actions">
             <a class="link" data-act="sync" data-id="${v.id}">获取配置</a>
+            <a class="link" data-act="term" data-id="${v.id}">终端</a>
             <a class="link" data-act="edit" data-id="${v.id}">编辑</a>
             <a class="link" style="color:#f5222d" data-act="del" data-id="${v.id}">删除</a>
           </td>
@@ -579,6 +580,7 @@ Views.vps = {
       const item = res.list.find((v) => v.id === id);
       if (!item) return;
       if (a.dataset.act === 'edit') return this.openForm(item);
+      if (a.dataset.act === 'term') return this.openTerminal(item);
       if (a.dataset.act === 'del') {
         if (!(await MEVPS.confirm(`确定删除 VPS「${MEVPS.esc(item.name)}」吗？此操作不可恢复。`))) return;
         try {
@@ -729,6 +731,102 @@ Views.vps = {
         }
       });
     }
+  },
+
+  /* ---- 浏览器内 SSH 终端（xterm.js + WebSocket → Worker → VPS:22） ---- */
+  async openTerminal(item) {
+    if (typeof Terminal === 'undefined') return MEVPS.toast('终端组件未加载，请刷新页面重试', 'error');
+    let ticket;
+    try {
+      const r = await MEVPS.api(`/vps/${item.id}/terminal-ticket`, { method: 'POST' });
+      ticket = r.ticket;
+    } catch (e) {
+      return MEVPS.toast(e.message, 'error');
+    }
+
+    const title = `SSH 终端 · ${item.name}（${item.ssh_host}:${item.ssh_port}）`;
+    const content = `
+      <div class="term-shell">
+        <div class="term-status" id="term-status">连接中…</div>
+        <div class="term-box" id="term-host"></div>
+      </div>`;
+
+    let ws = null;
+    let term = null;
+    let fit = null;
+    let disposed = false;
+    const statusEl = (msg, isErr) => {
+      const el = document.getElementById('term-status');
+      if (el) {
+        el.textContent = msg;
+        el.classList.toggle('err', !!isErr);
+      }
+    };
+    const cleanup = () => {
+      if (disposed) return;
+      disposed = true;
+      window.removeEventListener('resize', onWinResize);
+      try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) { /* ignore */ }
+      try { if (term) term.dispose(); } catch (e) { /* ignore */ }
+    };
+    const onWinResize = () => {
+      try { fit && fit.fit(); } catch (e) { /* ignore */ }
+    };
+
+    MEVPS.modal({ title, content, hideFooter: true, width: 860, onClose: cleanup });
+
+    term = new Terminal({
+      fontSize: 13,
+      fontFamily: 'Menlo, Monaco, Consolas, "Courier New", monospace',
+      cursorBlink: true,
+      theme: { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc' },
+      scrollback: 5000,
+    });
+    fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('term-host'));
+    try { fit.fit(); } catch (e) { /* ignore */ }
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/api/vps/${item.id}/terminal?ticket=${encodeURIComponent(ticket)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      statusEl('已连接，正在协商 SSH…');
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      term.focus();
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.type === 'ping') { ws.send(JSON.stringify({ type: 'pong' })); return; }
+          if (m.type === 'ready') { statusEl('已连接 · 输入 exit 或关闭窗口断开'); return; }
+          if (m.type === 'hostkey') {
+            term.write(`\r\n\x1b[33m⚑ 主机密钥 ${m.algo} ${m.fp}\x1b[0m\r\n`);
+            return;
+          }
+          if (m.type === 'error') {
+            statusEl(m.message, true);
+            term.write(`\r\n\x1b[31m✘ ${m.message}\x1b[0m\r\n`);
+            return;
+          }
+          if (m.type === 'closed') {
+            statusEl('连接已断开' + (m.reason ? '：' + m.reason : ''), true);
+            term.write('\r\n\x1b[90m[连接已断开]\x1b[0m\r\n');
+            return;
+          }
+        } catch (e) { /* ignore */ }
+        return;
+      }
+      term.write(new Uint8Array(ev.data));
+    };
+    ws.onclose = () => { if (!disposed) statusEl('连接已关闭', true); };
+    ws.onerror = () => { if (!disposed) statusEl('WebSocket 连接错误', true); };
+    term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); });
+    term.onResize(({ cols, rows }) => {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    });
+    window.addEventListener('resize', onWinResize);
   },
 
   openForm(item) {

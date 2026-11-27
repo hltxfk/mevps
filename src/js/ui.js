@@ -15,7 +15,7 @@
   };
 
   /* ---- Modal ---- */
-  MEVPS.modal = function ({ title, content, okText = '确 定', cancelText = '取 消', onOk, hideFooter = false, width }) {
+  MEVPS.modal = function ({ title, content, okText = '确 定', cancelText = '取 消', onOk, onClose, hideFooter = false, width }) {
     const root = document.getElementById('modal-root');
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -30,7 +30,7 @@
       </div>`;
     root.appendChild(overlay);
 
-    const close = () => overlay.remove();
+    const close = () => { if (onClose) onClose(); overlay.remove(); };
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) close();
       const act = e.target.closest('[data-act]');

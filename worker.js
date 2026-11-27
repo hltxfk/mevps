@@ -12,6 +12,8 @@
  *   - 首次收到 API 请求时自动建表并初始化（默认账号 admin / 123456）。
  */
 
+import { connect } from 'cloudflare:sockets';
+
 const API_VERSION = '1.0.0';
 
 /* ------------------------------ 工具函数 ------------------------------ */
@@ -690,6 +692,14 @@ async function handleApi(request, env, url) {
   // 单个 VPS 操作：修改 / 删除 / 启停
   const m = path.match(/^\/api\/vps\/(\d+)$/);
   const ma = path.match(/^\/api\/vps\/(\d+)\/action$/);
+  // 终端一次性票据（WebSocket 握手无法带 Authorization 头，改用短期 HMAC 票据）
+  const mt = path.match(/^\/api\/vps\/(\d+)\/terminal-ticket$/);
+  if (mt && method === 'POST') {
+    const id = Number(mt[1]);
+    const row = await db.prepare('SELECT id, name FROM vps WHERE id = ?').bind(id).first();
+    if (!row) return err('记录不存在', 404);
+    return ok({ ticket: await issueTerminalTicket(env, username, id) });
+  }
   if (m) {
     const id = Number(m[1]);
     const row = await db.prepare('SELECT * FROM vps WHERE id = ?').bind(id).first();
@@ -1505,6 +1515,948 @@ function sealForGitHub(pk, msg) {
 }
 /* ============ /VENDOR ============ */
 
+/* ==================== SSH 迷你客户端（浏览器内终端用） ====================
+ * 纯 JS 最小 SSH-2 客户端，供「终端」按钮经 Worker 与 VPS 建立交互式 SSH 会话。
+ * 只依赖 WebCrypto 与上方 vendored tweetnacl（ed25519 / x25519）。
+ *
+ * 算法支持：
+ *   KEX：       curve25519-sha256、ecdh-sha2-nistp256
+ *   加密：      aes128-gcm@openssh.com、aes256-gcm@openssh.com（AEAD，无独立 MAC）
+ *   主机密钥：  ssh-ed25519 / ecdsa-sha2-nistp256 / rsa-sha2-512 / rsa-sha2-256 / ssh-rsa（全部验签）
+ *   认证：      password / publickey（OpenSSH 私钥格式 ed25519/rsa/ecdsa；PEM PKCS#1/PKCS#8 RSA）
+ *   严格 KEX：  kex-strict-c/s-v00@openssh.com（防 Terrapin 前缀截断攻击）
+ *
+ * 交互式会话：pty-req + shell + window-change，通道层带窗口流量控制。
+ */
+const SSH = (() => {
+  const td = new TextDecoder();
+  const te2 = new TextEncoder();
+
+  /* ---- 缓冲区读写 ---- */
+  class Writer {
+    constructor() { this.parts = []; this.len = 0; }
+    raw(u8) { const b = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8); this.parts.push(b); this.len += b.length; return this; }
+    u8(v) { return this.raw(Uint8Array.of(v & 0xff)); }
+    u32(v) { return this.raw(Uint8Array.of((v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff)); }
+    bool(v) { return this.u8(v ? 1 : 0); }
+    str(s) { const b = typeof s === 'string' ? te2.encode(s) : s; return this.u32(b.length).raw(b); }
+    /* mpint：正整数大端，去前导零；最高位为 1 时补 0x00（RFC 4251 §5） */
+    mpint(u8) {
+      let b = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8);
+      let i = 0;
+      while (i < b.length - 1 && b[i] === 0) i++;
+      b = b.slice(i);
+      if (b.length === 0) b = Uint8Array.of(0);
+      if (b[0] & 0x80) { const n = new Uint8Array(b.length + 1); n.set(b, 1); b = n; }
+      return this.str(b);
+    }
+    bytes() {
+      const out = new Uint8Array(this.len);
+      let o = 0;
+      for (const p of this.parts) { out.set(p, o); o += p.length; }
+      return out;
+    }
+  }
+
+  class Reader {
+    constructor(u8) { this.b = u8; this.p = 0; }
+    u8() { return this.b[this.p++]; }
+    u32() { const v = ((this.b[this.p] << 24) | (this.b[this.p + 1] << 16) | (this.b[this.p + 2] << 8) | this.b[this.p + 3]) >>> 0; this.p += 4; return v; }
+    bytes(n) { const s = this.b.slice(this.p, this.p + n); this.p += n; return s; }
+    str() { return this.bytes(this.u32()); }
+    text() { return td.decode(this.str()); }
+    bool() { return this.u8() !== 0; }
+    /* mpint → 无符号大端字节（去掉可能的 0x00 填充） */
+    mpint() { const b = this.str(); if (b.length && b[0] === 0) return b.slice(1); return b; }
+  }
+
+  const cat = (...arrs) => {
+    let n = 0;
+    for (const a of arrs) n += a.length;
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const a of arrs) { out.set(a, o); o += a.length; }
+    return out;
+  };
+
+  /* ---- 哈希 / AES-GCM ---- */
+  async function digest(name, data) { return new Uint8Array(await crypto.subtle.digest(name, data)); }
+  const sha256 = (d) => digest('SHA-256', d);
+  async function importAesKey(raw) { return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']); }
+
+  /* GCM 的 12 字节 IV：前 4 字节固定，后 8 字节为大端调用计数器，每包 +1（RFC 5647 §7.1） */
+  function incIv(iv) {
+    const out = iv.slice();
+    for (let i = 11; i >= 4; i--) { out[i] = (out[i] + 1) & 0xff; if (out[i] !== 0) break; }
+    return out;
+  }
+
+  /* ---- base64url / JWK 辅助（WebCrypto 用 JWK 导入最省事，免拼 DER） ---- */
+  function b64urlBytes(u8) {
+    let s = '';
+    for (const b of u8) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64uToBytes(s) {
+    const t = String(s).replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(t + '='.repeat((4 - (t.length % 4)) % 4));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  /* 无符号大端整数 → base64url（去前导零） */
+  const jwkInt = (u8) => {
+    let i = 0;
+    while (i < u8.length - 1 && u8[i] === 0) i++;
+    return b64urlBytes(u8.slice(i));
+  };
+  function bytesToBig(u8) { let n = 0n; for (const b of u8) n = (n << 8n) | BigInt(b); return n; }
+  function bigToBytes(n) {
+    if (n === 0n) return Uint8Array.of(0);
+    let hex = n.toString(16);
+    if (hex.length % 2) hex = '0' + hex;
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+  /* RSA 私钥 JWK 需完整分量（含 CRT 参数），dp/dq 由 d、p、q 推出 */
+  function rsaJwk(k) {
+    const dBig = bytesToBig(k.d); const pBig = bytesToBig(k.p); const qBig = bytesToBig(k.q);
+    return {
+      kty: 'RSA',
+      n: jwkInt(k.n), e: jwkInt(k.e), d: jwkInt(k.d),
+      p: jwkInt(k.p), q: jwkInt(k.q),
+      dp: jwkInt(bigToBytes(dBig % (pBig - 1n))),
+      dq: jwkInt(bigToBytes(dBig % (qBig - 1n))),
+      qi: jwkInt(k.qi),
+    };
+  }
+
+  /* ---- 私钥文件解析 ---- */
+  function parsePem(pem) {
+    const m = String(pem).match(/-----BEGIN ([A-Z0-9 ]+)-----([\s\S]+?)-----END \1-----/);
+    if (!m) throw new Error('无法识别的私钥格式');
+    const bin = atob(m[2].replace(/\s+/g, ''));
+    const der = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) der[i] = bin.charCodeAt(i);
+    return { label: m[1], der };
+  }
+
+  /* OpenSSH 私钥格式（openssh-key-v1） */
+  function parseOpensshPrivateKey(pem) {
+    const { label, der } = parsePem(pem);
+    if (label !== 'OPENSSH PRIVATE KEY') throw new Error(`暂不支持的私钥类型：${label}（请用 ssh-keygen 生成的 OPENSSH 格式）`);
+    const r0 = new Reader(der);
+    if (td.decode(r0.bytes(14)) !== 'openssh-key-v1' || r0.u8() !== 0) throw new Error('私钥格式损坏（magic 不匹配）');
+    const cipherName = r0.text();
+    const kdfName = r0.text();
+    r0.str(); // kdfoptions
+    if (r0.u32() !== 1) throw new Error('仅支持单私钥文件');
+    r0.str(); // 公钥部分（忽略）
+    if (cipherName !== 'none' || kdfName !== 'none') {
+      throw new Error('暂不支持带口令加密的私钥，请改用密码认证，或用 ssh-keygen -p -N "" 去掉口令');
+    }
+    const r = new Reader(r0.str()); // 私钥部分（string 封装）
+    if (r.u32() !== r.u32()) throw new Error('私钥校验失败（可能已损坏或需要口令）');
+    const keyType = r.text();
+    if (keyType === 'ssh-ed25519') {
+      const pub = r.str();
+      const priv = r.str(); // 64 字节：seed(32) || pub(32)
+      if (priv.length < 32) throw new Error('ed25519 私钥损坏');
+      return { kind: 'ed25519', seed: priv.slice(0, 32), pub };
+    }
+    if (keyType === 'ssh-rsa') {
+      const n = r.mpint(); const e = r.mpint(); const d = r.mpint();
+      const qi = r.mpint(); const p = r.mpint(); const q = r.mpint(); // iqmp, p, q
+      return { kind: 'rsa', n, e, d, p, q, qi };
+    }
+    if (keyType === 'ecdsa-sha2-nistp256') {
+      r.text(); // curve 名
+      const q = r.str(); // 65 字节未压缩点
+      const d = r.mpint();
+      return { kind: 'ecdsa', q, d };
+    }
+    throw new Error(`暂不支持的私钥算法：${keyType}`);
+  }
+
+  /* 极简 ASN.1 DER：拆出 SEQUENCE 内的各元素 */
+  function derReadAll(buf) {
+    const out = [];
+    let p = 0;
+    while (p < buf.length) {
+      p++; // tag
+      let n = buf[p++];
+      if (n & 0x80) {
+        const c = n & 0x7f;
+        n = 0;
+        for (let i = 0; i < c; i++) n = (n << 8) | buf[p++];
+      }
+      out.push(buf.slice(p, p + n));
+      p += n;
+    }
+    return out;
+  }
+
+  function parsePkcs1Rsa(der) {
+    const ints = derReadAll(derReadAll(der)[0]);
+    return { n: ints[1], e: ints[2], d: ints[3], p: ints[4], q: ints[5], qi: ints[8] };
+  }
+
+  /* ---- 主机密钥验签（sigAlgo 取自签名 blob 首串，决定哈希） ---- */
+  async function verifyHostKey(kexHash, hostKeyBlob, sigBlob) {
+    const hr = new Reader(hostKeyBlob);
+    const blobType = hr.text();
+    const sr = new Reader(sigBlob);
+    const sigAlgo = sr.text();
+    try {
+      if (sigAlgo === 'ssh-ed25519') {
+        const pub = hr.str();
+        const sig = sr.str();
+        return nacl.sign.detached.verify(kexHash, sig, pub);
+      }
+      if (sigAlgo === 'ecdsa-sha2-nistp256') {
+        hr.text(); // 'nistp256'
+        const q = hr.str();
+        const inner = new Reader(sr.str()); // 签名 blob：string(mpw(r), mpint(s))
+        const rawSig = cat(pad32(inner.mpint()), pad32(inner.mpint()));
+        const key = await crypto.subtle.importKey('raw', q, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+        return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, rawSig, kexHash);
+      }
+      if (sigAlgo === 'rsa-sha2-512' || sigAlgo === 'rsa-sha2-256' || sigAlgo === 'ssh-rsa') {
+        const e = hr.mpint(); const n = hr.mpint(); // blob 类型为 ssh-rsa（或 rsa-sha2-*），后跟 e、n
+        void blobType;
+        const sig = sr.str();
+        const hashName = sigAlgo === 'rsa-sha2-512' ? 'SHA-512' : sigAlgo === 'rsa-sha2-256' ? 'SHA-256' : 'SHA-1';
+        const key = await crypto.subtle.importKey('jwk', { kty: 'RSA', n: jwkInt(n), e: jwkInt(e) }, { name: 'RSASSA-PKCS1-v1_5', hash: hashName }, false, ['verify']);
+        return await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, key, sig, kexHash);
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+  function pad32(u8) { const out = new Uint8Array(32); out.set(u8.slice(-32), 32 - Math.min(32, u8.length)); return out; }
+
+  /* ---- 用户私钥 → 签名器 ---- */
+  async function rsaUserKey(jwk, blob) {
+    /* 现代服务器默认拒 ssh-rsa(SHA-1)，统一用 rsa-sha2-512 签名（RFC 8332）。
+     * USERAUTH_REQUEST 的算法名是 rsa-sha2-512，但公钥 blob 内仍嵌 "ssh-rsa"。 */
+    const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' }, false, ['sign']);
+    return {
+      sigAlgo: 'rsa-sha2-512',
+      blob,
+      sign: async (data) => new Writer().str('rsa-sha2-512').str(new Uint8Array(await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, key, data))).bytes(),
+    };
+  }
+
+  async function ecdsaUserKey(jwk) {
+    const key = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    const q = cat(Uint8Array.of(4), b64uToBytes(jwk.x), b64uToBytes(jwk.y));
+    return {
+      sigAlgo: 'ecdsa-sha2-nistp256',
+      blob: new Writer().str('ecdsa-sha2-nistp256').str('nistp256').str(q).bytes(),
+      sign: async (data) => {
+        const raw = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, data));
+        return new Writer().str('ecdsa-sha2-nistp256').str(new Writer().mpint(raw.slice(0, 32)).mpint(raw.slice(32, 64)).bytes()).bytes();
+      },
+    };
+  }
+
+  async function buildUserKey(pemText) {
+    const { label } = parsePem(pemText);
+    if (label === 'OPENSSH PRIVATE KEY') {
+      const k = parseOpensshPrivateKey(pemText);
+      if (k.kind === 'ed25519') {
+        const kp = nacl.sign.keyPair.fromSeed(k.seed);
+        return {
+          sigAlgo: 'ssh-ed25519',
+          blob: new Writer().str('ssh-ed25519').str(kp.publicKey).bytes(),
+          sign: async (data) => new Writer().str('ssh-ed25519').str(nacl.sign.detached(data, kp.secretKey)).bytes(),
+        };
+      }
+      if (k.kind === 'rsa') {
+        const blob = new Writer().str('ssh-rsa').mpint(k.e).mpint(k.n).bytes();
+        return rsaUserKey(rsaJwk(k), blob);
+      }
+      if (k.kind === 'ecdsa') {
+        return ecdsaUserKey({ kty: 'EC', crv: 'P-256', x: b64urlBytes(k.q.slice(1, 33)), y: b64urlBytes(k.q.slice(33, 65)), d: jwkInt(k.d) });
+      }
+    }
+    if (label === 'RSA PRIVATE KEY') {
+      const k = parsePkcs1Rsa(derReadAll(parsePem(pemText).der)[0]);
+      const blob = new Writer().str('ssh-rsa').mpint(k.e).mpint(k.n).bytes();
+      return rsaUserKey(rsaJwk(k), blob);
+    }
+    if (label === 'PRIVATE KEY') {
+      /* PKCS#8：RSA / ECDSA 直接导入后导出 JWK 复用 */
+      const { der } = parsePem(pemText);
+      for (const spec of [
+        { alg: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' }, fix: async (jwk) => rsaUserKey(jwk, new Writer().str('ssh-rsa').mpint(b64uToBytes(jwk.e)).mpint(b64uToBytes(jwk.n)).bytes()) },
+        { alg: { name: 'ECDSA', namedCurve: 'P-256' }, fix: (jwk) => ecdsaUserKey(jwk) },
+      ]) {
+        try {
+          const key = await crypto.subtle.importKey('pkcs8', der, spec.alg, true, ['sign']);
+          return await spec.fix(await crypto.subtle.exportKey('jwk', key));
+        } catch { /* 尝试下一个 */ }
+      }
+      throw new Error('无法解析该 PKCS#8 私钥（支持 RSA / ECDSA P-256）');
+    }
+    throw new Error(`暂不支持的私钥类型：${label}`);
+  }
+
+  /* ---- 协议常量 ---- */
+  const MSG = {
+    DISCONNECT: 1, IGNORE: 2, UNIMPLEMENTED: 3, DEBUG: 4, SERVICE_REQUEST: 5, SERVICE_ACCEPT: 6, EXT_INFO: 7,
+    KEXINIT: 20, NEWKEYS: 21, KEX_ECDH_INIT: 30, KEX_ECDH_REPLY: 31,
+    USERAUTH_REQUEST: 50, USERAUTH_FAILURE: 51, USERAUTH_SUCCESS: 52, USERAUTH_BANNER: 53, USERAUTH_PK_OK: 60,
+    GLOBAL_REQUEST: 80, REQUEST_SUCCESS: 81, REQUEST_FAILURE: 82,
+    CHANNEL_OPEN: 90, CHANNEL_OPEN_CONFIRMATION: 91, CHANNEL_OPEN_FAILURE: 92, CHANNEL_WINDOW_ADJUST: 93,
+    CHANNEL_DATA: 94, CHANNEL_EXTENDED_DATA: 95, CHANNEL_EOF: 96, CHANNEL_CLOSE: 97, CHANNEL_REQUEST: 98,
+    CHANNEL_SUCCESS: 99, CHANNEL_FAILURE: 100,
+  };
+
+  const KEX_ALGOS = 'curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,kex-strict-c-v00@openssh.com';
+  const HOSTKEY_ALGOS = 'ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256,ssh-rsa';
+  const ENC_ALGOS = 'aes128-gcm@openssh.com,aes256-gcm@openssh.com';
+  const MAC_ALGOS = 'hmac-sha2-256,hmac-sha2-512,hmac-sha1'; // AEAD 不使用，仅供协商占位
+  const COMP_ALGOS = 'none';
+
+  function pickName(myList, serverList) {
+    const server = new Set(serverList.split(',').map((s) => s.trim()));
+    for (const n of myList.split(',')) if (server.has(n.trim())) return n.trim();
+    return null;
+  }
+
+  /* ---- 主体 ---- */
+  class SshClient {
+    /** @param transport { write(Uint8Array), close(), onData(fn), onClose(fn), onError(fn) } */
+    constructor(transport) {
+      this.t = transport;
+      this.inbuf = new Uint8Array(0);
+      this.gotServerVer = false;
+      this.sentVer = false;
+      this.sendSeq = 0;
+      this.recvSeq = 0;
+      this.sendChain = Promise.resolve();
+      this.pumping = false;
+      this.encOut = null;
+      this.encIn = null;
+      this.sessionId = null;
+      this.kexDone = false;
+      this.strictApplied = false;
+      this.msgQ = [];
+      this.waiters = [];
+      this.closed = false;
+      this.closeReason = '';
+      this.remoteChan = 0;
+      this.remoteChanSet = false;
+      this.remoteWindow = 0;
+      this.remoteMaxPacket = 32768;
+      this.recvWindowMax = 2 * 1024 * 1024;
+      this.recvWindow = this.recvWindowMax;
+      this.sendQueue = [];
+      this.onDataCb = null;
+      this.onEventCb = null;
+
+      transport.onData((d) => this.feed(d));
+      transport.onClose(() => this.handleClose('连接已关闭'));
+      transport.onError((e) => this.handleClose('连接错误：' + (e && e.message ? e.message : e)));
+    }
+
+    onData(cb) { this.onDataCb = cb; }
+    onEvent(cb) { this.onEventCb = cb; }
+    emit(type, detail) { if (this.onEventCb) this.onEventCb({ type, ...detail }); }
+
+    handleClose(reason) {
+      if (this.closed) return;
+      this.closed = true;
+      this.closeReason = reason;
+      for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.reject(new Error(reason)); }
+      this.emit('closed', { reason });
+      try { this.t.close(); } catch { /* ignore */ }
+    }
+
+    close() {
+      if (this.closed) return;
+      if (this.remoteChanSet) {
+        this.sendPacket(new Writer().u8(MSG.CHANNEL_CLOSE).u32(this.remoteChan).bytes()).catch(() => {});
+      }
+      this.closed = true;
+      this.sendChain.then(() => { try { this.t.close(); } catch { /* ignore */ } });
+    }
+
+    /* ---------- 包编解码 ---------- */
+    /* 加密/明文在链式任务执行时才决定，保证 NEWKEYS 前后包序严格正确 */
+    sendPacket(payload) {
+      this.sendChain = this.sendChain.then(async () => {
+        if (this.closed && payload[0] !== MSG.CHANNEL_CLOSE) return;
+        /* 对齐规则跟 OpenSSH packet.c：EtM/AEAD 模式长度字段不加密，
+         * 不计入对齐（len -= aadlen），即 bodyLen ≡ 0 (mod block)；
+         * 明文模式为 (4+bodyLen) ≡ 0 (mod 8)。 */
+        const blockSize = this.encOut ? 16 : 8;
+        const baseLen = (this.encOut ? 0 : 4) + 1 + payload.length;
+        let pad = blockSize - (baseLen % blockSize);
+        if (pad < 4) pad += blockSize;
+        const bodyLen = 1 + payload.length + pad;
+        const body = new Uint8Array(bodyLen);
+        body[0] = pad;
+        body.set(payload, 1);
+        crypto.getRandomValues(body.subarray(1 + payload.length));
+        const lenBe = new Writer().u32(bodyLen).bytes();
+        if (this.encOut) {
+          const iv = this.encOut.iv;
+          this.encOut.iv = incIv(iv);
+          const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: lenBe }, this.encOut.key, body));
+          this.t.write(cat(lenBe, cipher));
+        } else {
+          this.t.write(cat(lenBe, body));
+        }
+        this.sendSeq = (this.sendSeq + 1) >>> 0;
+      });
+      return this.sendChain;
+    }
+
+    feed(chunk) {
+      if (this.closed) return;
+      this.inbuf = cat(this.inbuf, chunk);
+      if (!this.gotServerVer) {
+        const nl = this.inbuf.indexOf(10);
+        if (nl < 0) return;
+        const line = td.decode(this.inbuf.slice(0, nl)).replace(/\r$/, '');
+        this.inbuf = this.inbuf.slice(nl + 1);
+        if (line.startsWith('SSH-')) {
+          this.serverVer = line;
+          this.gotServerVer = true;
+          if (!this.sentVer) this.sendVersion();
+        }
+        /* 非 SSH- 开头的行是 banner，丢弃后继续等版本行 */
+      }
+      this.pump();
+    }
+
+    async pump() {
+      if (this.pumping) return;
+      this.pumping = true;
+      try {
+        while (!this.closed && this.gotServerVer) {
+          const pkt = await this.takePacket();
+          if (!pkt) break;
+          this.recvSeq = (this.recvSeq + 1) >>> 0;
+          try { this.dispatch(pkt); } catch (e) { this.handleClose('协议处理错误：' + (e && e.message ? e.message : e)); return; }
+        }
+      } finally {
+        this.pumping = false;
+      }
+    }
+
+    async takePacket() {
+      if (this.inbuf.length < 4) return null;
+      const dv = new DataView(this.inbuf.buffer, this.inbuf.byteOffset, this.inbuf.byteLength);
+      const packetLen = dv.getUint32(0);
+      if (packetLen > 4 * 1024 * 1024 || packetLen < 1) { this.handleClose('包长度异常'); return null; }
+      if (!this.encIn) {
+        const total = 4 + packetLen;
+        if (this.inbuf.length < total) return null;
+        const body = this.inbuf.slice(4, total);
+        this.inbuf = this.inbuf.slice(total);
+        return body.slice(1, body.length - body[0]);
+      }
+      /* AEAD：4 字节明文长度(AAD) + 密文(packetLen) + 16 字节 tag */
+      const total = 4 + packetLen + 16;
+      if (this.inbuf.length < total) return null;
+      const lenBe = this.inbuf.slice(0, 4);
+      const ct = this.inbuf.slice(4, total);
+      this.inbuf = this.inbuf.slice(total);
+      const iv = this.encIn.iv;
+      this.encIn.iv = incIv(iv);
+      let plain;
+      try {
+        plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: lenBe }, this.encIn.key, ct));
+      } catch {
+        this.handleClose('解密失败（密钥协商异常或数据被篡改）');
+        return null;
+      }
+      return plain.slice(1, plain.length - plain[0]);
+    }
+
+    dispatch(payload) {
+      const type = payload[0];
+      if (type === MSG.KEXINIT) {
+        if (!this.kexDone && !this.serverKexInit) {
+          this.serverKexInit = payload;
+          if (this.kexResolve) this.kexResolve();
+        } else if (this.kexDone && !this.rekeyPromise) {
+          /* 会话中 rekey */
+          this.rekeyPromise = (async () => {
+            try {
+              const myInit = this.buildKexInit();
+              await this.sendPacket(myInit);
+              await this.doKex(payload, myInit);
+            } catch (e) {
+              this.handleClose('rekey 失败：' + (e && e.message ? e.message : e));
+            }
+          })();
+        }
+        return;
+      }
+      if (type === MSG.KEX_ECDH_REPLY || type === MSG.NEWKEYS || type === MSG.SERVICE_ACCEPT
+        || type === MSG.USERAUTH_SUCCESS || type === MSG.USERAUTH_FAILURE || type === MSG.USERAUTH_PK_OK
+        || type === MSG.CHANNEL_OPEN_CONFIRMATION || type === MSG.CHANNEL_OPEN_FAILURE
+        || type === MSG.CHANNEL_SUCCESS || type === MSG.CHANNEL_FAILURE) {
+        this.deliver(type, payload);
+        return;
+      }
+      if (type === MSG.DISCONNECT) {
+        const r = new Reader(payload);
+        r.u8(); r.u32();
+        this.handleClose('服务器断开连接：' + (r.text() || '（无说明）'));
+        return;
+      }
+      if (type === MSG.IGNORE || type === MSG.UNIMPLEMENTED || type === MSG.DEBUG || type === MSG.EXT_INFO || type === MSG.USERAUTH_BANNER) return;
+      if (type === MSG.GLOBAL_REQUEST) {
+        const r = new Reader(payload);
+        r.u8(); r.text();
+        if (r.bool()) this.sendPacket(new Writer().u8(MSG.REQUEST_FAILURE).bytes()).catch(() => {});
+        return;
+      }
+      if (type === MSG.CHANNEL_DATA || type === MSG.CHANNEL_EXTENDED_DATA) {
+        const r = new Reader(payload);
+        r.u8();
+        const chan = r.u32();
+        if (type === MSG.CHANNEL_EXTENDED_DATA) r.u32(); // data_type
+        const data = r.str();
+        if (chan === this.remoteChan) {
+          this.recvWindow -= data.length;
+          if (this.recvWindow < this.recvWindowMax / 2) {
+            const add = this.recvWindowMax - this.recvWindow;
+            this.recvWindow += add;
+            this.sendPacket(new Writer().u8(MSG.CHANNEL_WINDOW_ADJUST).u32(this.remoteChan).u32(add).bytes()).catch(() => {});
+          }
+          if (this.onDataCb) this.onDataCb(data);
+        }
+        return;
+      }
+      if (type === MSG.CHANNEL_WINDOW_ADJUST) {
+        const r = new Reader(payload);
+        r.u8(); r.u32();
+        this.remoteWindow += r.u32();
+        this.flushSendQueue();
+        return;
+      }
+      if (type === MSG.CHANNEL_REQUEST) {
+        const r = new Reader(payload);
+        r.u8();
+        const chan = r.u32();
+        const req = r.text();
+        const wantReply = r.bool();
+        if (req === 'exit-status') this.emit('exit', { code: r.u32() });
+        else if (req === 'exit-signal') this.emit('exit', { signal: r.text() });
+        if (wantReply && chan === this.remoteChan) {
+          this.sendPacket(new Writer().u8(MSG.CHANNEL_SUCCESS).u32(chan).bytes()).catch(() => {});
+        }
+        return;
+      }
+      if (type === MSG.CHANNEL_EOF) return;
+      if (type === MSG.CHANNEL_CLOSE) {
+        if (!this.closed) {
+          this.sendPacket(new Writer().u8(MSG.CHANNEL_CLOSE).u32(this.remoteChan).bytes()).catch(() => {});
+          this.closed = true;
+          this.emit('closed', { reason: '会话已结束' });
+          this.sendChain.then(() => { try { this.t.close(); } catch { /* ignore */ } });
+        }
+        return;
+      }
+    }
+
+    deliver(type, payload) {
+      for (let i = 0; i < this.waiters.length; i++) {
+        if (this.waiters[i].types.includes(type)) {
+          const w = this.waiters.splice(i, 1)[0];
+          clearTimeout(w.timer);
+          w.resolve(payload);
+          return;
+        }
+      }
+      this.msgQ.push({ type, payload });
+    }
+
+    waitMsg(types, timeoutMs = 30000) {
+      for (let i = 0; i < this.msgQ.length; i++) {
+        if (types.includes(this.msgQ[i].type)) return Promise.resolve(this.msgQ.splice(i, 1)[0].payload);
+      }
+      return new Promise((resolve, reject) => {
+        const w = { types, resolve, reject };
+        w.timer = setTimeout(() => {
+          const i = this.waiters.indexOf(w);
+          if (i >= 0) this.waiters.splice(i, 1);
+          reject(new Error('SSH 握手超时（' + types.join('/') + '）'));
+        }, timeoutMs);
+        this.waiters.push(w);
+      });
+    }
+
+    /* ---------- 版本交换 / KEX ---------- */
+    sendVersion() {
+      this.clientVer = 'SSH-2.0-MEVPS_1.0';
+      this.t.write(te2.encode(this.clientVer + '\r\n'));
+      this.sentVer = true;
+    }
+
+    buildKexInit() {
+      const cookie = new Uint8Array(16);
+      crypto.getRandomValues(cookie);
+      return new Writer()
+        .u8(MSG.KEXINIT).raw(cookie)
+        .str(KEX_ALGOS).str(HOSTKEY_ALGOS).str(ENC_ALGOS).str(ENC_ALGOS)
+        .str(MAC_ALGOS).str(MAC_ALGOS).str(COMP_ALGOS).str(COMP_ALGOS)
+        .str('').str('')
+        .bool(false).u32(0)
+        .bytes();
+    }
+
+    /* 主入口：握手 + 认证 + 交互式 shell */
+    async login({ username, password, privateKey, term = 'xterm-256color', cols = 80, rows = 24 }) {
+      if (!this.sentVer) this.sendVersion();
+      const myInit = this.buildKexInit();
+      await this.sendPacket(myInit);
+      if (!this.serverKexInit) {
+        await Promise.race([
+          new Promise((res) => { this.kexResolve = res; }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('等待服务器 KEXINIT 超时')), 30000)),
+        ]);
+      }
+      await this.doKex(this.serverKexInit, myInit);
+
+      await this.sendPacket(new Writer().u8(MSG.SERVICE_REQUEST).str('ssh-userauth').bytes());
+      await this.waitMsg([MSG.SERVICE_ACCEPT], 30000);
+
+      if (password) {
+        await this.authPassword(username, password);
+      } else if (privateKey) {
+        const key = await buildUserKey(privateKey);
+        await this.authPublicKey(username, key);
+      } else {
+        throw new Error('未提供密码或私钥');
+      }
+      await this.openShell(term, cols, rows);
+    }
+
+    async doKex(serverInit, myInit) {
+      const sr = new Reader(serverInit);
+      sr.u8(); sr.bytes(16);
+      const serverKex = sr.text(); const serverHostKey = sr.text();
+      const serverEnc2c = sr.text(); const serverEnc2s = sr.text();
+      sr.text(); sr.text(); sr.text(); sr.text(); // mac / comp（AEAD 下不参与）
+
+      const kexAlgo = pickName(KEX_ALGOS, serverKex);
+      const hostKeyAlgo = pickName(HOSTKEY_ALGOS, serverHostKey);
+      const enc2c = pickName(ENC_ALGOS, serverEnc2c);
+      const enc2s = pickName(ENC_ALGOS, serverEnc2s);
+      if (!kexAlgo || !hostKeyAlgo || !enc2c || !enc2s) throw new Error('算法协商失败（服务器不支持所需算法）');
+      /* 严格 KEX（防 Terrapin）：双方都声明才启用 */
+      const strict = serverKex.split(',').includes('kex-strict-s-v00@openssh.com');
+
+      let qC; let shared;
+      if (kexAlgo.startsWith('curve25519')) {
+        const sk = new Uint8Array(32);
+        crypto.getRandomValues(sk);
+        qC = nacl.scalarMult.base(sk);
+        await this.sendPacket(new Writer().u8(MSG.KEX_ECDH_INIT).str(qC).bytes());
+        const reply = await this.waitMsg([MSG.KEX_ECDH_REPLY], 30000);
+        const rr = new Reader(reply);
+        rr.u8();
+        const kS = rr.str(); const qS = rr.str(); const sigBlob = rr.str();
+        shared = nacl.scalarMult(sk, qS);
+        if (!shared || shared.every((b) => b === 0)) throw new Error('ECDH 共享密钥无效');
+        return this.finishKex({ hostKeyAlgo, enc2c, enc2s, kS, qC, qS, sigBlob, shared, strict, myInit, serverInit });
+      }
+      /* ecdh-sha2-nistp256 */
+      const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+      qC = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+      await this.sendPacket(new Writer().u8(MSG.KEX_ECDH_INIT).str(qC).bytes());
+      const reply2 = await this.waitMsg([MSG.KEX_ECDH_REPLY], 30000);
+      const rr2 = new Reader(reply2);
+      rr2.u8();
+      const kS2 = rr2.str(); const qS2 = rr2.str(); const sigBlob2 = rr2.str();
+      const peerKey = await crypto.subtle.importKey('raw', qS2, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+      shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: peerKey }, kp.privateKey, 256));
+      return this.finishKex({ hostKeyAlgo, enc2c, enc2s, kS: kS2, qC, qS: qS2, sigBlob: sigBlob2, shared, strict, myInit, serverInit });
+    }
+
+    async finishKex({ hostKeyAlgo, enc2c, enc2s, kS, qC, qS, sigBlob, shared, strict, myInit, serverInit }) {
+      void hostKeyAlgo;
+      /* 交换哈希 H（RFC 4253 §8 + RFC 5656 §4） */
+      const h = new Writer()
+        .str(this.clientVer).str(this.serverVer)
+        .str(myInit).str(serverInit)
+        .str(kS).str(qC).str(qS).mpint(shared);
+      const H = await sha256(h.bytes());
+      if (!this.sessionId) this.sessionId = H;
+
+      /* 主机密钥验签（签名对象为 H） */
+      const ok = await verifyHostKey(H, kS, sigBlob);
+      if (!ok) throw new Error('主机密钥签名验证失败（可能存在中间人攻击！）');
+      const fp = 'SHA256:' + btoa(String.fromCharCode(...await sha256(kS))).replace(/=+$/, '');
+      this.emit('hostkey', { fp, algo: new Reader(kS).text() });
+
+      /* 密钥派生（RFC 4253 §7.2）：A/B=IV，C/D=加密密钥 */
+      const keyLen = enc2c.startsWith('aes128') ? 16 : 32;
+      const derive = async (letter, need) => {
+        let out = new Uint8Array(0);
+        let prev = new Uint8Array(0);
+        while (out.length < need) {
+          prev = await sha256(cat(new Writer().mpint(shared).bytes(), H, te2.encode(letter), prev.length ? prev : this.sessionId));
+          out = cat(out, prev);
+        }
+        return out.slice(0, need);
+      };
+      const ivC = await derive('A', 12);
+      const ivS = await derive('B', 12);
+      const keyC = await derive('C', keyLen);
+      const keyS = await derive('D', keyLen);
+
+      /* NEWKEYS 之后启用出站密钥；严格 KEX 下首个 NEWKEYS 后序号清零 */
+      await this.sendPacket(new Writer().u8(MSG.NEWKEYS).bytes());
+      this.encOut = { key: await importAesKey(keyC), iv: ivC.slice() };
+      if (strict && !this.strictApplied) { this.strictApplied = true; this.sendSeq = 0; }
+
+      await this.waitMsg([MSG.NEWKEYS], 30000);
+      this.encIn = { key: await importAesKey(keyS), iv: ivS.slice() };
+      if (strict && this.strictApplied) this.recvSeq = 0;
+      this.kexDone = true;
+    }
+
+    /* ---------- 认证 ---------- */
+    async authPassword(username, password) {
+      await this.sendPacket(new Writer()
+        .u8(MSG.USERAUTH_REQUEST).str(username).str('ssh-connection').str('password')
+        .bool(false).str(password).bytes());
+      await this.expectAuthOk();
+    }
+
+    async authPublicKey(username, key) {
+      /* USERAUTH_REQUEST 构造：hasSig=true 时带签名字段；签名对象是去掉签名字段的请求全文 */
+      const reqBody = (hasSig) => new Writer()
+        .u8(MSG.USERAUTH_REQUEST).str(username).str('ssh-connection').str('publickey')
+        .bool(hasSig).str(key.sigAlgo).str(key.blob).bytes();
+      const toSign = cat(new Writer().str(this.sessionId).bytes(), reqBody(true));
+      const sig = await key.sign(toSign);
+      const w = new Writer().raw(reqBody(true)).str(sig);
+      await this.sendPacket(w.bytes());
+      await this.expectAuthOk();
+    }
+
+    async expectAuthOk() {
+      const msg = await this.waitMsg([MSG.USERAUTH_SUCCESS, MSG.USERAUTH_FAILURE, MSG.USERAUTH_PK_OK], 30000);
+      if (msg[0] === MSG.USERAUTH_SUCCESS) return;
+      if (msg[0] === MSG.USERAUTH_PK_OK) return this.expectAuthOk();
+      const r = new Reader(msg);
+      r.u8();
+      const methods = r.text();
+      const partial = r.bool();
+      throw new Error(partial ? '认证不完整，请继续认证' : `认证失败（服务器允许的方式：${methods || '无'}）`);
+    }
+
+    /* ---------- 交互式 shell ---------- */
+    async openShell(term, cols, rows) {
+      await this.sendPacket(new Writer().u8(MSG.CHANNEL_OPEN).str('session').u32(0).u32(this.recvWindowMax).u32(32768).bytes());
+      const conf = await this.waitMsg([MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE], 30000);
+      if (conf[0] === MSG.CHANNEL_OPEN_FAILURE) {
+        const r = new Reader(conf);
+        r.u8(); r.u32();
+        throw new Error('服务器拒绝打开会话通道：' + r.text());
+      }
+      const r = new Reader(conf);
+      r.u8(); r.u32(); // 我方通道号
+      this.remoteChan = r.u32();
+      this.remoteWindow = r.u32();
+      this.remoteMaxPacket = Math.min(r.u32() || 32768, 32768);
+      this.remoteChanSet = true;
+
+      /* pty-req */
+      await this.sendPacket(new Writer()
+        .u8(MSG.CHANNEL_REQUEST).u32(this.remoteChan).str('pty-req').bool(true)
+        .str(term).u32(cols).u32(rows).u32(cols * 8).u32(rows * 16)
+        .str(Uint8Array.of(0))
+        .bytes());
+      let rep = await this.waitMsg([MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE], 30000);
+      if (rep[0] === MSG.CHANNEL_FAILURE) throw new Error('PTY 申请被服务器拒绝');
+
+      /* shell */
+      await this.sendPacket(new Writer().u8(MSG.CHANNEL_REQUEST).u32(this.remoteChan).str('shell').bool(true).bytes());
+      rep = await this.waitMsg([MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE], 30000);
+      if (rep[0] === MSG.CHANNEL_FAILURE) throw new Error('Shell 启动被服务器拒绝');
+      this.emit('ready', {});
+    }
+
+    /* 终端输入 → 通道数据（带发送窗口流控） */
+    write(data) {
+      if (this.closed) return;
+      this.sendQueue.push(typeof data === 'string' ? te2.encode(data) : data);
+      this.flushSendQueue();
+    }
+
+    flushSendQueue() {
+      while (this.sendQueue.length && this.remoteWindow > 0) {
+        const chunkSize = Math.min(this.sendQueue[0].length, this.remoteMaxPacket, this.remoteWindow);
+        const chunk = this.sendQueue[0].slice(0, chunkSize);
+        if (chunkSize < this.sendQueue[0].length) this.sendQueue[0] = this.sendQueue[0].slice(chunkSize);
+        else this.sendQueue.shift();
+        this.remoteWindow -= chunkSize;
+        this.sendPacket(new Writer().u8(MSG.CHANNEL_DATA).u32(this.remoteChan).str(chunk).bytes()).catch(() => {});
+      }
+    }
+
+    /* 终端尺寸变化 */
+    resize(cols, rows) {
+      if (this.closed || !this.remoteChanSet) return;
+      this.sendPacket(new Writer()
+        .u8(MSG.CHANNEL_REQUEST).u32(this.remoteChan).str('window-change').bool(false)
+        .u32(cols).u32(rows).u32(cols * 8).u32(rows * 16).bytes()).catch(() => {});
+    }
+  }
+
+  return { SshClient, buildUserKey, Writer, Reader, MSG };
+})();
+/* ==================== /SSH 迷你客户端 ==================== */
+
+/* ==================== 终端 WebSocket 网关 ====================
+ * 浏览器 ←WebSocket→ 本 Worker ←TCP(SshClient)→ VPS:22。
+ * 鉴权：先用 Bearer 会话换 5 分钟一次性 HMAC 票据（WS 握手带不了 Authorization 头）。 */
+
+async function issueTerminalTicket(env, user, vpsId) {
+  const secret = await getSetting(env.db, 'token_secret');
+  const payload = b64url(JSON.stringify({ u: user, v: vpsId, exp: Date.now() + 5 * 60 * 1000, r: randomHex(8) }));
+  return `${payload}.${await hmacSign(secret, 'term.' + payload)}`;
+}
+
+async function verifyTerminalTicket(env, ticket, vpsId) {
+  if (!ticket || !ticket.includes('.')) return null;
+  const [payload, sig] = ticket.split('.');
+  const secret = await getSetting(env.db, 'token_secret');
+  const expect = await hmacSign(secret, 'term.' + payload);
+  if (sig !== expect) return null;
+  try {
+    const data = JSON.parse(unb64url(payload));
+    if (!data.u || data.v !== vpsId || data.exp < Date.now()) return null;
+    return data.u;
+  } catch {
+    return null;
+  }
+}
+
+async function handleTerminalWS(request, env, url) {
+  await ensureDb(env);
+  const m = url.pathname.match(/^\/api\/vps\/(\d+)\/terminal$/);
+  if (!m) return err('Not Found', 404);
+  const vpsId = Number(m[1]);
+  const user = await verifyTerminalTicket(env, url.searchParams.get('ticket'), vpsId);
+  if (!user) return err('票据无效或已过期，请重新打开终端', 401);
+
+  const row = await env.db.prepare('SELECT * FROM vps WHERE id = ?').bind(vpsId).first();
+  if (!row) return err('记录不存在', 404);
+  const secret = await decSecret(env, row.ssh_secret_enc);
+  if (!secret) return err('该 VPS 未配置 SSH 凭据', 400);
+
+  const pair = new WebSocketPair();
+  const [clientWs, serverWs] = [pair[0], pair[1]];
+  serverWs.accept();
+  startTerminalSession({ env, row, secret, ws: serverWs, user, ip: clientIp(request) });
+  return new Response(null, { status: 101, webSocket: clientWs });
+}
+
+function startTerminalSession({ env, row, secret, ws, user, ip }) {
+  const send = (obj) => { try { ws.send(JSON.stringify(obj)); } catch { /* ignore */ } };
+  const keepAlive = setInterval(() => send({ type: 'ping' }), 45000);
+  const cleanup = () => { clearInterval(keepAlive); };
+
+  let socket;
+  try {
+    socket = connect({ hostname: row.ssh_host, port: row.ssh_port });
+  } catch (e) {
+    send({ type: 'error', message: 'TCP 连接失败：' + (e && e.message ? e.message : e) });
+    cleanup();
+    try { ws.close(1011); } catch { /* ignore */ }
+    return;
+  }
+
+  /* cloudflare:sockets → SshClient transport 适配 */
+  const writer = socket.writable.getWriter();
+  const t = {
+    _onData: null, _onClose: null, _onError: null,
+    onData(fn) { this._onData = fn; },
+    onClose(fn) { this._onClose = fn; },
+    onError(fn) { this._onError = fn; },
+    write(u8) { writer.write(u8).catch((e) => this._onError && this._onError(e)); },
+    close() { try { socket.close(); } catch { /* ignore */ } },
+  };
+  (async () => {
+    const reader = socket.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && t._onData) t._onData(new Uint8Array(value));
+      }
+      if (t._onClose) t._onClose();
+    } catch (e) {
+      if (t._onError) t._onError(e);
+    }
+  })();
+
+  const ssh = new SSH.SshClient(t);
+  ssh.onData((d) => { try { ws.send(d); } catch { /* ignore */ } });
+  ssh.onEvent((ev) => {
+    if (ev.type === 'ready') send({ type: 'ready' });
+    else if (ev.type === 'hostkey') send({ type: 'hostkey', fp: ev.fp, algo: ev.algo });
+    else if (ev.type === 'exit') send({ type: 'exit', code: ev.code, signal: ev.signal });
+    else if (ev.type === 'closed') {
+      send({ type: 'closed', reason: ev.reason });
+      cleanup();
+      try { ws.close(1000); } catch { /* ignore */ }
+    }
+  });
+
+  ws.addEventListener('message', (ev) => {
+    if (typeof ev.data === 'string') {
+      /* 控制帧为 JSON（resize/ping/pong）；其余字符串是终端输入 */
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg && typeof msg === 'object') {
+          if (msg.type === 'resize') return ssh.resize(Number(msg.cols) || 80, Number(msg.rows) || 24);
+          if (msg.type === 'ping' || msg.type === 'pong') return;
+        }
+      } catch { /* 非 JSON：按终端输入处理 */ }
+      ssh.write(ev.data);
+      return;
+    }
+    ssh.write(new Uint8Array(ev.data));
+  });
+  ws.addEventListener('close', () => {
+    cleanup();
+    ssh.close();
+  });
+  ws.addEventListener('error', () => {
+    cleanup();
+    ssh.close();
+  });
+
+  ssh.login({
+    username: row.ssh_username,
+    password: row.ssh_auth === 'key' ? '' : secret,
+    privateKey: row.ssh_auth === 'key' ? secret : '',
+    cols: 80,
+    rows: 24,
+  }).then(async () => {
+    await addLog(env.db, user, '终端', row.name, `打开 SSH 终端 ${row.ssh_host}:${row.ssh_port}`, ip);
+  }).catch((e) => {
+    send({ type: 'error', message: '连接失败：' + (e && e.message ? e.message : e) });
+    cleanup();
+    try { ws.close(1011); } catch { /* ignore */ }
+  });
+}
+/* ==================== /终端 WebSocket 网关 ==================== */
+
 /* ------------------------------ 入口 ------------------------------ */
 
 export default {
@@ -1513,6 +2465,14 @@ export default {
     url.pathname = normalizePathname(url.pathname);
 
     if (url.pathname.startsWith('/api/')) {
+      // WebSocket 升级：浏览器内 SSH 终端（/api/vps/:id/terminal）
+      if ((request.headers.get('Upgrade') || '').toLowerCase() === 'websocket') {
+        try {
+          return await handleTerminalWS(request, env, url);
+        } catch (e) {
+          return err(`服务器内部错误: ${e && e.message ? e.message : e}`, 500);
+        }
+      }
       try {
         return await handleApi(request, env, url);
       } catch (e) {
