@@ -30,7 +30,7 @@ jobs:
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
           JOB_ID: ${{ github.event.client_payload.job_id }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           : "${WORKER_URL:?请在 GitHub Secrets 配置 WORKER_URL}"
           : "${CALLBACK_SECRET:?请在 GitHub Secrets 配置 CALLBACK_SECRET}"
           : "${JOB_ID:?repository_dispatch 缺少 job_id}"
@@ -47,6 +47,63 @@ jobs:
               -d "$body"
           }
 
+          # ==== 失败兜底：成功/失败都必须回传结果 ====
+          # 否则 Worker 侧 sync_jobs 停在 pending、vps.sync_status 停在 running，
+          # 面板一直显示「同步中」，只能干等 15 分钟超时兜底。
+          ONLINE=false
+          ERR=""
+          SPEC=""
+          COUNTRY=""
+          CITY=""
+          KEYFILE=""
+          RESULT_POSTED=0
+
+          # 幂等回传：RESULT_POSTED 保证不会重复上报。
+          send_result() {
+            if [ "$RESULT_POSTED" = 1 ]; then return 0; fi
+            local body
+            body=$(jq -nc \
+              --arg job "$JOB_ID" \
+              --arg country "$COUNTRY" \
+              --arg city "$CITY" \
+              --arg spec "$SPEC" \
+              --arg err "$ERR" \
+              --argjson online "$ONLINE" \
+              '{job_id:$job, country:$country, city:$city, spec:$spec, online:$online, ok:$online, error:$err}')
+            if post "/api/internal/result" "$body" >/dev/null; then
+              RESULT_POSTED=1
+              return 0
+            fi
+            return 1
+          }
+
+          # 任意命令失败都记下位置，别让 set -e 悄悄退出。
+          # $BASH_COMMAND 是命令源码文本（变量引用不展开，形如 "$SECRET"），
+          # 不会把密钥值带进错误信息；仍截断长度，避免写爆 sync_error 字段。
+          on_err() {
+            local code=$?
+            if [ -z "$ERR" ]; then
+              ERR="执行器失败：脚本第 $1 行 ${3:0:120}（exit=${code}）"
+            fi
+            ONLINE=false
+          }
+          trap 'on_err "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
+          # 退出时统一回传 + 清理临时密钥文件。
+          # 全脚本只能有【一个】on EXIT 的 trap：再注册一个 cleanup 的 EXIT trap
+          # 会把本 trap 整个覆盖掉。所以清理必须并进来。
+          on_exit() {
+            local code=$?
+            trap - EXIT ERR
+            set +e
+            if [ -n "$KEYFILE" ]; then rm -f "$KEYFILE"; fi
+            # 回传本身失败也要把 run 标红，别静默吞掉
+            send_result || code=1
+            exit "$code"
+          }
+          trap on_exit EXIT
+
+
           # 1) 取连接凭据（HMAC 鉴权，临时取用）
           cred_body=$(jq -nc --arg j "$JOB_ID" '{job_id:$j}')
           creds=$(post "/api/internal/creds" "$cred_body")
@@ -55,13 +112,11 @@ jobs:
           USER=$(jq -r '.data.username // "root"' <<<"$creds")
           AUTH=$(jq -r '.data.auth // "password"' <<<"$creds")
           SECRET=$(jq -r '.data.secret // ""' <<<"$creds")
-          ::add-mask::$SECRET
-          ::add-mask::$HOST
+          echo "::add-mask::$SECRET"
+          echo "::add-mask::$HOST"
 
           KEYFILE=""
           cleanup() { [ -n "$KEYFILE" ] && rm -f "$KEYFILE"; }
-          trap cleanup EXIT
-
           # 2) SSH 采集
           ONLINE=false
           ERR=""
@@ -113,5 +168,5 @@ jobs:
             --arg err "$ERR" \
             --argjson online "$ONLINE" \
             '{job_id:$job, country:$country, city:$city, spec:$spec, online:$online, ok:$online, error:$err}')
-          post "/api/internal/result" "$res_body" >/dev/null
+          send_result
           echo "同步完成 online=$ONLINE spec=$SPEC geo=$COUNTRY $CITY"
