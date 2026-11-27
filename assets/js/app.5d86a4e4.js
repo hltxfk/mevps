@@ -611,30 +611,38 @@ Views.vps = {
         <label class="field"><span class="field-label">启用哪个 Token</span>
           <select class="select" id="a-token-type">
             <option value="classic" ${cfg.active_type !== 'fine' ? 'selected' : ''}>Classic PAT（repo 权限）</option>
-            <option value="fine" ${cfg.active_type === 'fine' ? 'selected' : ''}>细粒度 PAT（Contents: Read and write）</option>
+            <option value="fine" ${cfg.active_type === 'fine' ? 'selected' : ''}>细粒度 PAT（Contents + Secrets 读写）</option>
           </select></label>
         <label class="field"><span class="field-label">Classic Token</span>
           <input class="input" id="a-token-classic" type="password" value="" autocomplete="off" spellcheck="false"
             placeholder="${cfg.has_classic ? '已配置，留空保持不变' : 'ghp_... （需勾 repo 权限）'}" /></label>
         <label class="field"><span class="field-label">细粒度 Token</span>
           <input class="input" id="a-token-fine" type="password" value="" autocomplete="off" spellcheck="false"
-            placeholder="${cfg.has_fine ? '已配置，留空保持不变' : 'github_pat_... （需 Contents: Read and write）'}" /></label>
+            placeholder="${cfg.has_fine ? '已配置，留空保持不变' : 'github_pat_... （需 Contents 与 Secrets 均为 Read and write）'}" /></label>
         <label class="field span-2"><span class="field-label">回调密钥（CALLBACK_SECRET）</span>
           <input class="input" id="a-callback" type="password" value="" autocomplete="off" spellcheck="false"
             placeholder="${cfg.callback_set ? '已配置，留空保持不变' : '与 GitHub Secrets 的 CALLBACK_SECRET 填同一个值'}" /></label>
+        <div class="field span-2">
+          <button class="btn" id="a-sync-secrets" type="button">⚡ 一键同步到 GitHub Secrets</button>
+          <div class="muted" style="font-size:12px;margin-top:6px">
+            自动把 <code>WORKER_URL</code>（本面板地址）与 <code>CALLBACK_SECRET</code> 写入仓库的 Actions Secrets，
+            不用再去 GitHub 后台手动填。回调密钥未设置时会自动生成。
+          </div>
+        </div>
         <div class="field span-2">
           <p class="muted" style="font-size:12px;line-height:1.9;margin:0">
             ${MEVPS.icon('info', 13)} Token 仅用于调用 GitHub API 触发 Actions（<code>repository_dispatch</code>）。<br/>
             ${MEVPS.icon('info', 13)} 回调密钥用于 Actions 回传结果时的 HMAC 签名，需与 GitHub Secrets 的 <code>CALLBACK_SECRET</code> 一致。<br/>
             ${MEVPS.icon('check', 13)} 两个 Token 可<strong>同时保存</strong>，用「启用哪个 Token」随时切换，互不影响。<br/>
             ${MEVPS.icon('info', 13)} Classic PAT 需勾 <code>repo</code>（私有仓库必需，范围较广）；细粒度 PAT 需 <code>Contents: Read and write</code>——这是 <code>repository_dispatch</code> 的要求，<b>不是</b> <code>Actions: write</code>（填错会报 403）。<br/>
+            ${MEVPS.icon('info', 13)} 若用「一键同步」按钮，细粒度 PAT 还需 <code>Secrets: Read and write</code>（写入 Actions Secrets）。<br/>
             ${MEVPS.icon('check', 13)} 保存后 Token 以 <strong>AES-256-GCM</strong> 加密落库，界面永不回显明文，日志不打印。<br/>
             ${MEVPS.icon('info', 13)} 加密密钥来源：<code>${cfg.enc_source === 'secret' ? 'SSH_ENC_KEY（Cloudflare Secret）' : 'D1 settings 表'}</code>
           </p>
         </div>
       </div>`;
 
-    MEVPS.modal({
+    const dlg = MEVPS.modal({
       title: 'SSH 设置 · GitHub Actions 触发凭据',
       content,
       okText: '保 存',
@@ -665,6 +673,26 @@ Views.vps = {
         return false;
       },
     });
+
+    // 一键同步到 GitHub Secrets：写入 WORKER_URL 与 CALLBACK_SECRET
+    const syncBtn = dlg.overlay.querySelector('#a-sync-secrets');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', async () => {
+        if (syncBtn.disabled) return;
+        const oldText = syncBtn.textContent;
+        syncBtn.disabled = true;
+        syncBtn.textContent = '同步中…';
+        try {
+          const r = await MEVPS.api('/actions/sync-secrets', { method: 'POST' });
+          MEVPS.toast(`已写入 GitHub Secrets：${(r.synced || []).join('、')}`, 'success');
+        } catch (e) {
+          MEVPS.toast(e.message, 'error');
+        } finally {
+          syncBtn.disabled = false;
+          syncBtn.textContent = oldText;
+        }
+      });
+    }
   },
 
   openForm(item) {

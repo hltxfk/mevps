@@ -20,6 +20,25 @@ Worker 回写 D1：国家 / 城市地区 / 配置 / 在线态
 
 ## 一、仓库侧 Secrets（Settings → Secrets and variables → Actions）
 
+### 推荐：面板里点「一键同步」（不用来 GitHub 后台）
+
+VPS管理 → **SSH设置** → 填好仓库与 Token → 点 **⚡ 一键同步到 GitHub Secrets**。
+
+面板会自动把下面两个值写入仓库的 Actions Secrets：
+
+| Secret | 写入的值 |
+|---|---|
+| `WORKER_URL` | 自动取自面板自身地址，**无需手填** |
+| `CALLBACK_SECRET` | 未设置时自动生成；已设置则沿用当前值 |
+
+技术上，GitHub Secrets API 只接受 libsodium sealed box（`crypto_box_seal`）加密后的值，
+面板内置 tweetnacl + blakejs 完成加密（见 `worker.js` 的 `sealForGitHub()`），
+并与真 libsodium 做过交叉验证。
+
+> ⚠️ 用「一键同步」时，细粒度 PAT 需额外开 **`Secrets: Read and write`** 权限。
+
+### 手动：去 GitHub 后台填
+
 | Secret | 值 | 说明 |
 |---|---|---|
 | `WORKER_URL` | 你的面板地址，如 `https://mevps.xxx.workers.dev` | **结尾不带斜杠** |
@@ -39,15 +58,20 @@ VPS管理 → `+ 新增 VPS` 右边 → **SSH设置**，填四项：
 |---|---|
 | GitHub 仓库 | `hltxfk/mevps`（Actions workflow 所在仓库） |
 | 触发事件类型 | `vps-sync`（须与 workflow 的 `types` 一致） |
-| Token | classic（勾 `repo`）或细粒度 PAT（仅 `Actions: write`） |
-| 回调密钥 | **和 GitHub Secrets 的 `CALLBACK_SECRET` 完全一致** |
+| Token | classic（勾 `repo`）或细粒度 PAT（**`Contents: Read and write`**） |
+| 回调密钥 | **和 GitHub Secrets 的 `CALLBACK_SECRET` 完全一致**（用「一键同步」则不用管） |
 
 ## 三、Token 怎么建
 
 - **Classic PAT**：Settings → Developer settings → Personal access tokens (classic) → 勾 **`repo`**，Expiration 自定（可 `No expiration`）。
-- **细粒度 PAT**（推荐，权限更小）：Fine-grained tokens → 只选 `mevps` 仓库 → Permissions 仅 **`Actions: Read and write`** → 有效期最长 1 年。
+- **细粒度 PAT**（推荐，权限更小）：Fine-grained tokens → 只选 `mevps` 仓库 → Permissions：
+  - **`Contents: Read and write`** ← **必填**
+  - `Secrets: Read and write` ← 仅在用「一键同步」时需要
+  - 有效期最长 1 年。
 
-> 私有仓库的 `repository_dispatch` 需要 classic 的 `repo` 权限；细粒度只需 `Actions: write`。
+> ⚠️ **这里是个大坑**：`repository_dispatch`（`POST /repos/{o}/{r}/dispatches`）在 GitHub 官方权限文档里归属
+> **Contents** 类目、要求 `write`。`Actions: write` 对应的是 **`workflow_dispatch`**，两者不是一回事。
+> 填成 `Actions: write` 会报 `403 Resource not accessible by personal access token`。
 
 ## 四、用法
 
@@ -85,10 +109,13 @@ npx wrangler secret put SSH_ENC_KEY
 | 现象 | 推查方向 |
 |---|---|
 | 点「获取配置」报 `未配置 GitHub 仓库/Token` | 去「SSH设置」补齐 |
-| 报 `GitHub 触发失败（401/403）` | Token 过期或权限不足（private 仓库需 `repo` 或 `Actions: write`） |
+| 报 `GitHub 触发失败（403）Resource not accessible by personal access token` | 细粒度 PAT 少了 `Contents: Read and write`；报错里的「GitHub 要求的权限」会直接告诉你缺什么 |
+| 报 `GitHub Secrets 读取/写入失败（403）` | 「一键同步」需 **`Secrets: Read and write`** 权限 |
+| 报 `GitHub 触发失败（401/403）` | Token 过期或权限不足 |
 | 报 `GitHub 触发失败（404）` | 「GitHub 仓库」填错，或 workflow 文件没推上去 |
-| Actions 跑了但面板没更新 | `WORKER_URL` 填错（带了斜杠？）或 `CALLBACK_SECRET` 两边不一致 |
+| Actions 跑了但面板没更新 | `WORKER_URL` 填错（带了斜杠？）或 `CALLBACK_SECRET` 两边不一致。用「一键同步」可免这两个坑 |
 | Actions 报 `签名校验失败` | 回调密钥与 `CALLBACK_SECRET` 不一致 |
+| 面板一直卡「同步中」 | **15 分钟后会自动变成失败**并写明原因（多为 Secrets 未配） |
 | 同步失败 `SSH 连接失败` | 主机/端口/用户名/密码错，或 VPS 防火墙拦截（Actions 出口 IP 段需放行 22 端口） |
 
 > ⚠️ GitHub Actions 的出口 IP 是 GitHub 的 IP 段且会变动。你的 VPS 若要限制来源，
