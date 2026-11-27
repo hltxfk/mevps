@@ -356,6 +356,9 @@ async function dispatchSync(env, jobId, vpsId) {
     const res = await fetch(`https://api.github.com/repos/${owner}/${name}/dispatches`, {
       method: 'POST',
       headers: {
+        // GitHub REST API 强制要求 User-Agent，缺失时直接 403
+        // （"Request forbidden by administrative rules ... User-Agent header"）
+        'User-Agent': 'mevps-worker',
         'Content-Type': 'application/json',
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${token}`,
