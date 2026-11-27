@@ -34,6 +34,8 @@ jobs:
           : "${WORKER_URL:?请在 GitHub Secrets 配置 WORKER_URL}"
           : "${CALLBACK_SECRET:?请在 GitHub Secrets 配置 CALLBACK_SECRET}"
           : "${JOB_ID:?repository_dispatch 缺少 job_id}"
+          # 归一化：去掉末尾斜杠，避免拼出 //api/xxx 导致路由 404
+          WORKER_URL="$(printf '%s' "$WORKER_URL" | sed 's#/*$##')"
 
           hmac() { printf '%s' "$1" | openssl dgst -sha256 -hmac "$CALLBACK_SECRET" -hex | awk '{print $NF}'; }
           post() {

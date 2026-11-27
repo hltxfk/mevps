@@ -162,8 +162,8 @@ function clientIp(request) {
   return request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '-';
 }
 
-function nowStr() {
-  return new Date().toISOString().replace('T', ' ').slice(0, 19);
+function nowStr(ms = Date.now()) {
+  return new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
 }
 
 /* --------------------------- D1 自动初始化 --------------------------- */
@@ -342,6 +342,45 @@ async function createSyncJob(db, vpsId) {
   return id;
 }
 
+/* 同步超时兜底。
+ * 若 Actions 在取到凭据前就失败（最常见：GitHub Secrets 未配置），它永远不会回传结果，
+ * 任务会永久停在 pending/running，面板就一直显示「同步中」。
+ * 这里把超过 TTL 仍未回传的任务标记为 timeout，并回写 VPS 状态为失败。
+ * TTL 取 15 分钟：workflow 的 timeout-minutes 为 10，留 5 分钟余量。 */
+const SYNC_JOB_TTL_MS = 15 * 60 * 1000;
+const SYNC_TIMEOUT_MSG = '同步超时：Actions 未回传结果（多为 GitHub Secrets 未配置，或执行失败）';
+
+async function sweepStaleSyncJobs(db) {
+  const cutoff = nowStr(Date.now() - SYNC_JOB_TTL_MS);
+  const stale = await db
+    .prepare("SELECT id, vps_id FROM sync_jobs WHERE status IN ('pending','running') AND created_at < ?")
+    .bind(cutoff)
+    .all();
+  const rows = stale.results || [];
+  if (!rows.length) return 0;
+  const t = nowStr();
+  // 先终结任务，再回写 VPS；NOT EXISTS 保证不会把刚发起的新同步任务状态覆盖掉
+  for (const j of rows) {
+    await db.prepare("UPDATE sync_jobs SET status='timeout', updated_at=? WHERE id=?").bind(t, j.id).run();
+    await db
+      .prepare(
+        `UPDATE vps SET sync_status='error', sync_error=?, updated_at=?
+         WHERE id = ? AND NOT EXISTS (
+           SELECT 1 FROM sync_jobs j2 WHERE j2.vps_id = vps.id AND j2.status IN ('pending','running')
+         )`
+      )
+      .bind(SYNC_TIMEOUT_MSG, t, j.vps_id)
+      .run();
+  }
+  return rows.length;
+}
+
+/* 路径归一化：容忍 WORKER_URL 末尾多带斜杠导致的 //api/xxx，以及中间的重复斜杠。
+ * 必须在【入口分发】之前做，否则 //api/xxx 会被 startsWith('/api/') 判为非 API 而直接 404。 */
+function normalizePathname(p) {
+  return p.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
+}
+
 /* 把 GitHub API 的错误响应转成可读、可操作的提示。
  * 安全约定：只取响应体里的 message 与响应头里的权限说明，绝不回显 token。
  * 403 时 GitHub 会在 X-Accepted-GitHub-Permissions 响应头里直接说明所需权限。 */
@@ -411,9 +450,13 @@ async function dispatchSync(env, jobId, vpsId) {
 async function handleApi(request, env, url) {
   await ensureDb(env);
   const db = env.db;
-  const path = url.pathname.replace(/\/+$/, '') || '/';
+  // 归一化路径：容忍 WORKER_URL 末尾多带斜杠导致的 //api/xxx，以及中间的重复斜杠
+  const path = normalizePathname(url.pathname);
   const method = request.method;
   const ip = clientIp(request);
+
+  // 读取类接口顺带回收超时的同步任务，避免面板一直卡在「同步中」
+  if (method === 'GET' && (path === '/api/vps' || path === '/api/stats')) await sweepStaleSyncJobs(db);
 
   // 健康检查 + 登录（无需令牌）
   if (path === '/api/health') {
@@ -831,6 +874,7 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    url.pathname = normalizePathname(url.pathname);
 
     if (url.pathname.startsWith('/api/')) {
       try {
