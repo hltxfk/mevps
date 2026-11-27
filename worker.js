@@ -176,20 +176,23 @@ function nowStr(ms = Date.now()) {
 
 /* --------------------------- D1 自动初始化 --------------------------- */
 
+/* 数据库初始化（每次冷启动/首次请求时执行，幂等）。
+ *
+ * ⚠️ 这里【绝对不能】把 promise 缓存到 globalThis 供别的请求 await：
+ * Cloudflare 的 handle_cross_request_promise_resolution 兼容行为（由
+ * compatibility_date ≥ 2025 启用）规定「promise 只能在创建它的请求里 settle」，
+ * 跨请求 await 会永远无法 settle，并报：
+ *   "This promise was created by a request that has since ended, so it can never settle."
+ * 典型触发：用户刷新页面，浏览器 abort 掉上一页未完成的请求，
+ * 那个请求创建的 initDb promise 变成孤儿，后续请求 await 就炸。
+ *
+ * 因此这里只缓存一个普通布尔值（不是 promise），未命中就地跑一次初始化。
+ * 并发首次请求可能都跑一遍 initDb，所以 initDb 内部必须全幂等 + 并发容错。 */
 async function ensureDb(env) {
   const g = globalThis;
   if (g.__mevpsReady) return;
-  if (!g.__mevpsInit) {
-    g.__mevpsInit = initDb(env)
-      .then(() => {
-        g.__mevpsReady = true;
-      })
-      .catch((e) => {
-        g.__mevpsInit = null;
-        throw e;
-      });
-  }
-  return g.__mevpsInit;
+  await initDb(env);
+  g.__mevpsReady = true;
 }
 
 /* --------- vps 表结构升级：SSH 连接参数模型（v2） --------- */
@@ -275,10 +278,14 @@ async function initDb(env) {
   if (!userRow) {
     const salt = randomHex(16);
     const hash = await hashPassword('123456', salt);
-    await db
-      .prepare('INSERT INTO users (username, password_hash, salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    // 并发首次初始化时，另一个请求可能已经插入了 admin（username 有 UNIQUE 约束）。
+    // 用 INSERT OR IGNORE + changes 判断是否由本请求负责写演示数据，避免重复/抛错。
+    const inserted = await db
+      .prepare('INSERT OR IGNORE INTO users (username, password_hash, salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
       .bind('admin', hash, salt, nowStr(), nowStr())
       .run();
+    const insertedCount = inserted && inserted.meta ? inserted.meta.changes : 1;
+    if (insertedCount > 0) {
 
     // ---- 演示数据（仅首次初始化写入，可在面板中自行修改/删除）----
     const demo = [
@@ -303,6 +310,7 @@ async function initDb(env) {
       insLog.bind('admin', '新增', 'web-01', '创建 VPS 记录 web-01', '-', 'success', t),
       insLog.bind('system', '初始化', 'D1', '数据表自动初始化完成，写入演示数据', '-', 'success', t),
     ]);
+    }
   }
 }
 
