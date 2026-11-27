@@ -108,7 +108,7 @@ Views.vps = {
           <td><b>${MEVPS.esc(v.name)}</b>${v.remark ? `<div class="muted" style="font-size:12px">${MEVPS.esc(v.remark)}</div>` : ''}</td>
           <td><code>${MEVPS.esc(v.ssh_host)}</code>${v.ssh_port && Number(v.ssh_port) !== 22 ? `<span class="muted">:${MEVPS.esc(v.ssh_port)}</span>` : ''}
             ${geo ? `<div class="muted" style="font-size:12px">\u{1F4CD} ${MEVPS.esc(geo)}</div>` : ''}</td>
-          <td>${MEVPS.esc(v.spec || '-')}</td>
+          <td>${MEVPS.specCell(v.spec)}</td>
           <td class="muted">${MEVPS.esc((v.created_at || '').slice(0, 10))}</td>
           <td>${syncTag[v.sync_status] || MEVPS.esc(v.sync_status)}${v.sync_error ? `<div class="muted" style="font-size:11px">${MEVPS.esc(v.sync_error)}</div>` : ''}</td>
           <td class="actions">

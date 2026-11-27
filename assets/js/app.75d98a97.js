@@ -12,6 +12,23 @@ MEVPS.fmtMoney = (n) => '¥' + Number(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(
 
 MEVPS.fmtTime = (s) => (s ? String(s).slice(0, 16) : '-');
 
+/* 配置列两行渲染：
+ *   第一行 = CPU核心数 / 内存总量 / 根分区容量（空值用 -）
+ *   第二行 = 操作系统（灰色小字，跟列表其他辅助信息一致）
+ * spec 由执行器拼成 "cpu / mem / disk / os"，其中 cpu/mem/disk 是不含空白的
+ * 短 token（或空），os 是自由文本、可能含 "/"（如 "Debian GNU/Linux 12"）。
+ * ⚠️ 不能用 split(' / ')：某一项为空时，分隔符之间只剩空格（"5C /  / 634G"），
+ * 切出来的段数就不对了。所以用正则宽松匹配分隔符两侧空白，空白形式怎么变都能拆对。 */
+MEVPS.specCell = (spec) => {
+  const s = String(spec ?? '').trim();
+  if (!s) return '-';
+  const m = /^(\S*)\s*\/\s*(\S*)\s*\/\s*(\S*)\s*\/\s*([\s\S]*)$/.exec(s);
+  if (!m) return MEVPS.esc(s); // 旧格式 / 自由文本：原样单行
+  const head = [m[1], m[2], m[3]].map((x) => MEVPS.esc(x || '-')).join(' / ');
+  const os = m[4].trim();
+  return head + (os ? `<div class="muted" style="font-size:12px">${MEVPS.esc(os)}</div>` : '');
+};
+
 MEVPS.debounce = (fn, ms = 300) => {
   let t;
   return (...args) => {
@@ -515,7 +532,7 @@ Views.vps = {
           <td><b>${MEVPS.esc(v.name)}</b>${v.remark ? `<div class="muted" style="font-size:12px">${MEVPS.esc(v.remark)}</div>` : ''}</td>
           <td><code>${MEVPS.esc(v.ssh_host)}</code>${v.ssh_port && Number(v.ssh_port) !== 22 ? `<span class="muted">:${MEVPS.esc(v.ssh_port)}</span>` : ''}
             ${geo ? `<div class="muted" style="font-size:12px">\u{1F4CD} ${MEVPS.esc(geo)}</div>` : ''}</td>
-          <td>${MEVPS.esc(v.spec || '-')}</td>
+          <td>${MEVPS.specCell(v.spec)}</td>
           <td class="muted">${MEVPS.esc((v.created_at || '').slice(0, 10))}</td>
           <td>${syncTag[v.sync_status] || MEVPS.esc(v.sync_status)}${v.sync_error ? `<div class="muted" style="font-size:11px">${MEVPS.esc(v.sync_error)}</div>` : ''}</td>
           <td class="actions">
