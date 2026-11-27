@@ -342,6 +342,40 @@ async function createSyncJob(db, vpsId) {
   return id;
 }
 
+/* 把 GitHub API 的错误响应转成可读、可操作的提示。
+ * 安全约定：只取响应体里的 message 与响应头里的权限说明，绝不回显 token。
+ * 403 时 GitHub 会在 X-Accepted-GitHub-Permissions 响应头里直接说明所需权限。 */
+function ghApiError(res, text) {
+  let msg = '';
+  try {
+    const j = JSON.parse(text);
+    if (j && typeof j.message === 'string') msg = j.message;
+  } catch {
+    /* 非 JSON 响应（如 HTML 错误页），走下面的兜底 */
+  }
+  if (!msg) msg = String(text || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+  if (!msg) msg = `HTTP ${res.status}`;
+
+  const need = String(res.headers.get('X-Accepted-GitHub-Permissions') || '').trim();
+  const hint = [];
+  if (need) hint.push(`GitHub 要求的权限：${need}`);
+
+  if (res.status === 403 && /not accessible by (?:personal access )?token/i.test(msg)) {
+    if (!need) hint.push('fine-grained PAT 需「Contents: Read and write」；classic PAT 需勾选 repo 全量');
+    hint.push('并确认 Token 的仓库范围包含该仓库');
+  } else if (res.status === 403 && /rate limit/i.test(msg)) {
+    hint.push('触发了 GitHub API 限流，请稍后再试');
+  } else if (res.status === 404) {
+    hint.push('请检查「GitHub仓库」是否为 owner/repo 格式，且 Token 能访问该仓库');
+  } else if (res.status === 401) {
+    hint.push('Token 无效或已过期，请到「SSH设置」重新填写');
+  } else if (res.status === 422) {
+    hint.push('事件类型或仓库名格式不合法');
+  }
+
+  return `GitHub 触发失败（${res.status}）${msg}${hint.length ? '｜' + hint.join('；') : ''}`;
+}
+
 /* repository_dispatch 触发 Actions。
  * 安全约定：client_payload 只含 job_id / vps_id，绝不携带 SSH 凭据或任何密钥。 */
 async function dispatchSync(env, jobId, vpsId) {
@@ -368,7 +402,7 @@ async function dispatchSync(env, jobId, vpsId) {
     });
     if (res.status === 204 || res.ok) return { ok: true };
     const text = await res.text().catch(() => '');
-    return { ok: false, error: `GitHub 触发失败（${res.status}）${text.slice(0, 200)}` };
+    return { ok: false, error: ghApiError(res, text) };
   } catch (e) {
     return { ok: false, error: `GitHub 调用异常: ${e && e.message ? e.message : e}` };
   }
@@ -627,7 +661,7 @@ async function handleApi(request, env, url) {
     const jobId = await createSyncJob(db, id);
     const d = await dispatchSync(env, jobId, id);
     if (!d.ok) {
-      await db.prepare("UPDATE vps SET sync_status='error', sync_error=?, updated_at=? WHERE id=?").bind(d.error.slice(0, 300), nowStr(), id).run();
+      await db.prepare("UPDATE vps SET sync_status='error', sync_error=?, updated_at=? WHERE id=?").bind(d.error.slice(0, 500), nowStr(), id).run();
       await db.prepare("UPDATE sync_jobs SET status='failed', updated_at=? WHERE id=?").bind(nowStr(), jobId).run();
       await addLog(db, username, '同步', row.name, `同步触发失败：${d.error}`, ip, 'fail');
       return err(d.error);
