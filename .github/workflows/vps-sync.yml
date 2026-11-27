@@ -55,6 +55,9 @@ jobs:
           SPEC=""
           COUNTRY=""
           CITY=""
+          IP=""
+          GEO_EN=""
+          GEO_ZH=""
           KEYFILE=""
           RESULT_POSTED=0
 
@@ -68,8 +71,11 @@ jobs:
               --arg city "$CITY" \
               --arg spec "$SPEC" \
               --arg err "$ERR" \
+              --arg ip "$IP" \
+              --arg geo_en "$GEO_EN" \
+              --arg geo_zh "$GEO_ZH" \
               --argjson online "$ONLINE" \
-              '{job_id:$job, country:$country, city:$city, spec:$spec, online:$online, ok:$online, error:$err}')
+              '{job_id:$job, country:$country, city:$city, spec:$spec, online:$online, ok:$online, error:$err, ip:$ip, geo_en:$geo_en, geo_zh:$geo_zh}')
             if post "/api/internal/result" "$body" >/dev/null; then
               RESULT_POSTED=1
               return 0
@@ -160,21 +166,22 @@ jobs:
             ERR=${ERR:-SSH 连接失败}
           fi
 
-          # 3) 归属地（国家 + 城市/地区）
+          # 3) 归属地（国家 / 州省 / 市）+ 解析出的 IP
+          # 中英各查一次：ip-api 的 lang=zh-CN 只翻译部分字段（市常常仍是英文），
+          # 取不到就落回英文。IP 用 getent 从 DNS 解析；与填写的「主机 / IP」一致时
+          # 前端只显示一个，否则显示 ip + (域名)。
+          IP=$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1; exit}')
+          IP=${IP:-$HOST}
           if [ "$ONLINE" = "true" ] || [ -n "$HOST" ]; then
             GEO=$(curl -fsS "http://ip-api.com/json/${HOST}?fields=status,country,regionName,city" 2>/dev/null || echo '{}')
+            GEO_Z=$(curl -fsS "http://ip-api.com/json/${HOST}?fields=status,country,regionName,city&lang=zh-CN" 2>/dev/null || echo '{}')
+            geo3() { jq -r '[.country, .regionName, .city] | map(select(type=="string" and length>0)) | join(" · ")' <<<"$1"; }
             COUNTRY=$(jq -r '.country // ""' <<<"$GEO")
             CITY=$(jq -r '[.city, .regionName] | map(select(. != null and . != "")) | join(" ")' <<<"$GEO")
+            GEO_EN=$(geo3 "$GEO")
+            GEO_ZH=$(geo3 "$GEO_Z")
           fi
 
-          # 4) 回传结果（HMAC 鉴权）
-          res_body=$(jq -nc \
-            --arg job "$JOB_ID" \
-            --arg country "$COUNTRY" \
-            --arg city "$CITY" \
-            --arg spec "$SPEC" \
-            --arg err "$ERR" \
-            --argjson online "$ONLINE" \
-            '{job_id:$job, country:$country, city:$city, spec:$spec, online:$online, ok:$online, error:$err}')
+          # 4) 回传结果（HMAC 鉴权）——成功失败都回传，见 send_result / trap on_exit
           send_result
-          echo "同步完成 online=$ONLINE spec=$SPEC geo=$COUNTRY $CITY"
+          echo "同步完成 online=$ONLINE ip=$IP geo=$GEO_EN / $GEO_ZH"

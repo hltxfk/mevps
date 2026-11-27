@@ -199,19 +199,18 @@ async function ensureDb(env) {
 async function migrateVps(db) {
   const row = await db.prepare("SELECT value FROM settings WHERE key = 'vps_schema_ver'").first();
   const ver = row ? Number(row.value) || 0 : 0;
-  if (ver >= 2) return;
   const info = await db.prepare('PRAGMA table_info(vps)').all();
-  const cols = new Set((info.results || []).map((c) => c.name));
-  const mark = () =>
+  let cols = new Set((info.results || []).map((c) => c.name));
+  const mark = (v) =>
     db
-      .prepare("INSERT INTO settings (key, value) VALUES ('vps_schema_ver', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .prepare("INSERT INTO settings (key, value) VALUES ('vps_schema_ver', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .bind(String(v))
       .run();
-  if (!cols.has('ip')) {
-    // 全新安装或已是新结构：仅标版本
-    await mark();
-    return;
-  }
-  // 旧结构（ip/region/provider/price/expire_date）→ 重建为 SSH 模型，保留可用数据
+
+  // v1 旧结构 → v2 SSH 模型：整表重建，保留可用数据。
+  // ⚠️ 判据不能用 ip：从 v3 起 ip 是正式字段、新表也有，拿它判旧表会误伤；
+  //    改用旧表专有的 provider / expire_date 识别。
+  if (ver < 2 && (cols.has('provider') || cols.has('expire_date'))) {
   await db
     .prepare(
       'CREATE TABLE vps_new (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, ssh_host TEXT NOT NULL, ssh_port INTEGER DEFAULT 22, ssh_username TEXT DEFAULT "root", ssh_auth TEXT DEFAULT "password", ssh_secret_enc TEXT DEFAULT "", country TEXT DEFAULT "", city TEXT DEFAULT "", spec TEXT DEFAULT "", online INTEGER DEFAULT -1, sync_status TEXT DEFAULT "idle", sync_error TEXT DEFAULT "", last_sync_at TEXT DEFAULT "", remark TEXT DEFAULT "", created_at TEXT, updated_at TEXT)'
@@ -223,7 +222,20 @@ async function migrateVps(db) {
   await db.prepare('DROP TABLE vps').run();
   await db.prepare('ALTER TABLE vps_new RENAME TO vps').run();
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_vps_sync ON vps(sync_status)').run();
-  await mark();
+  }
+
+  // v2 → v3：补 IP 与归属地中英两套字段（幂等，已有则跳过）
+  const info2 = await db.prepare('PRAGMA table_info(vps)').all();
+  cols = new Set((info2.results || []).map((c) => c.name));
+  const adds = [
+    ['ip', 'TEXT DEFAULT ""'],
+    ['geo_en', 'TEXT DEFAULT ""'],
+    ['geo_zh', 'TEXT DEFAULT ""'],
+  ];
+  for (const [nm, ddl] of adds) {
+    if (!cols.has(nm)) await db.prepare('ALTER TABLE vps ADD COLUMN ' + nm + ' ' + ddl).run();
+  }
+  await mark(3);
 }
 
 async function initDb(env) {
@@ -533,10 +545,13 @@ async function handleApi(request, env, url) {
     if (!job) return err('同步任务不存在', 404);
     const good = payload.ok !== false;
     await db
-      .prepare('UPDATE vps SET country=?, city=?, spec=?, online=?, sync_status=?, sync_error=?, last_sync_at=?, updated_at=? WHERE id=?')
+      .prepare('UPDATE vps SET country=?, city=?, ip=?, geo_en=?, geo_zh=?, spec=?, online=?, sync_status=?, sync_error=?, last_sync_at=?, updated_at=? WHERE id=?')
       .bind(
         String(payload.country || '').slice(0, 64),
         String(payload.city || '').slice(0, 64),
+        String(payload.ip || '').slice(0, 64),
+        String(payload.geo_en || '').slice(0, 120),
+        String(payload.geo_zh || '').slice(0, 120),
         String(payload.spec || '').slice(0, 300),
         payload.online === true ? 1 : payload.online === false ? 0 : -1,
         good ? 'ok' : 'error',
@@ -618,8 +633,8 @@ async function handleApi(request, env, url) {
     const where = [];
     const args = [];
     if (keyword) {
-      where.push('(name LIKE ? OR ssh_host LIKE ? OR country LIKE ? OR city LIKE ? OR remark LIKE ?)');
-      args.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+      where.push('(name LIKE ? OR ssh_host LIKE ? OR country LIKE ? OR city LIKE ? OR geo_en LIKE ? OR geo_zh LIKE ? OR remark LIKE ?)');
+      args.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
     }
     if (status) {
       where.push('sync_status = ?');
@@ -630,7 +645,7 @@ async function handleApi(request, env, url) {
     // 安全列白名单：绝不回传 ssh_secret_enc
     const list = await db
       .prepare(
-        `SELECT id, name, ssh_host, ssh_port, ssh_username, ssh_auth, country, city, spec, online, sync_status, sync_error, last_sync_at, remark, created_at, updated_at FROM vps ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`
+        `SELECT id, name, ssh_host, ssh_port, ssh_username, ssh_auth, country, city, ip, geo_en, geo_zh, spec, online, sync_status, sync_error, last_sync_at, remark, created_at, updated_at FROM vps ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`
       )
       .bind(...args, pageSize, (page - 1) * pageSize)
       .all();

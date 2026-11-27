@@ -100,14 +100,12 @@ Views.vps = {
     };
     tbody.innerHTML =
       res.list.map((v) => {
-        const geo = [v.country, v.city].filter(Boolean).join(' \u00b7 ');
         return `
         <tr>
           <td class="col-check"><input type="checkbox" class="row-check" data-id="${v.id}" ${st.selected.has(v.id) ? 'checked' : ''} /></td>
           <td class="muted">#${v.id}</td>
           <td><b>${MEVPS.esc(v.name)}</b>${v.remark ? `<div class="muted" style="font-size:12px">${MEVPS.esc(v.remark)}</div>` : ''}</td>
-          <td><code>${MEVPS.esc(v.ssh_host)}</code>${v.ssh_port && Number(v.ssh_port) !== 22 ? `<span class="muted">:${MEVPS.esc(v.ssh_port)}</span>` : ''}
-            ${geo ? `<div class="muted" style="font-size:12px">\u{1F4CD} ${MEVPS.esc(geo)}</div>` : ''}</td>
+          <td>${MEVPS.hostCell(v)}</td>
           <td>${MEVPS.specCell(v.spec)}</td>
           <td class="muted">${MEVPS.esc((v.created_at || '').slice(0, 10))}</td>
           <td>${syncTag[v.sync_status] || MEVPS.esc(v.sync_status)}${v.sync_error ? `<div class="muted" style="font-size:11px">${MEVPS.esc(v.sync_error)}</div>` : ''}</td>

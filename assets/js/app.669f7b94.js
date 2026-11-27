@@ -29,6 +29,27 @@ MEVPS.specCell = (spec) => {
   return head + (os ? `<div class="muted" style="font-size:12px">${MEVPS.esc(os)}</div>` : '');
 };
 
+/* IP 地址列三行渲染：
+ *   第一行 = IP；与填写的「主机 / IP」不同时补上域名，形如 1.2.3.4:2222 (vps.example.com)
+ *   第二行 = 归属地中文（灰色小字）
+ *   第三行 = 归属地英文（灰色小字，原样式，不带图标）
+ * ip 由执行器从 DNS 解析；旧记录没同步过就没有 ip，回退直接显示填写的主机。 */
+MEVPS.hostCell = (v) => {
+  const host = String(v.ssh_host || '');
+  const ip = String(v.ip || '').trim();
+  const port = Number(v.ssh_port);
+  const portTxt = port && port !== 22 ? ':' + port : '';
+  const shown = ip || host;
+  const line1 = ip && ip !== host ? shown + portTxt + ` (${host})` : shown + portTxt;
+  const geoEn = String(v.geo_en || '') || [v.country, v.city].filter(Boolean).join(' · ');
+  const geoZh = String(v.geo_zh || '');
+  return (
+    `<code>${MEVPS.esc(line1)}</code>` +
+    (geoZh ? `<div class="muted" style="font-size:12px">${MEVPS.esc(geoZh)}</div>` : '') +
+    (geoEn ? `<div class="muted" style="font-size:12px">${MEVPS.esc(geoEn)}</div>` : '')
+  );
+};
+
 MEVPS.debounce = (fn, ms = 300) => {
   let t;
   return (...args) => {
@@ -524,14 +545,12 @@ Views.vps = {
     };
     tbody.innerHTML =
       res.list.map((v) => {
-        const geo = [v.country, v.city].filter(Boolean).join(' \u00b7 ');
         return `
         <tr>
           <td class="col-check"><input type="checkbox" class="row-check" data-id="${v.id}" ${st.selected.has(v.id) ? 'checked' : ''} /></td>
           <td class="muted">#${v.id}</td>
           <td><b>${MEVPS.esc(v.name)}</b>${v.remark ? `<div class="muted" style="font-size:12px">${MEVPS.esc(v.remark)}</div>` : ''}</td>
-          <td><code>${MEVPS.esc(v.ssh_host)}</code>${v.ssh_port && Number(v.ssh_port) !== 22 ? `<span class="muted">:${MEVPS.esc(v.ssh_port)}</span>` : ''}
-            ${geo ? `<div class="muted" style="font-size:12px">\u{1F4CD} ${MEVPS.esc(geo)}</div>` : ''}</td>
+          <td>${MEVPS.hostCell(v)}</td>
           <td>${MEVPS.specCell(v.spec)}</td>
           <td class="muted">${MEVPS.esc((v.created_at || '').slice(0, 10))}</td>
           <td>${syncTag[v.sync_status] || MEVPS.esc(v.sync_status)}${v.sync_error ? `<div class="muted" style="font-size:11px">${MEVPS.esc(v.sync_error)}</div>` : ''}</td>
