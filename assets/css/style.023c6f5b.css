@@ -325,12 +325,18 @@ table.table { width: 100%; border-collapse: collapse; }
   display: flex; align-items: center; justify-content: center; animation: fadeIn 0.18s ease;
 }
 .modal {
+  position: relative;
   width: 520px; max-width: calc(100vw - 32px); max-height: calc(100vh - 80px); overflow-y: auto;
   background: #fff; border-radius: 12px; box-shadow: var(--shadow-pop); animation: popIn 0.2s ease;
 }
 .modal-header { padding: 18px 24px; font-size: 16px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
-.modal-close { width: 28px; height: 28px; border: none; background: transparent; border-radius: 6px; cursor: pointer; color: var(--text-3); font-size: 18px; line-height: 1; }
-.modal-close:hover { background: #f0f1f5; color: var(--text-1); }
+.modal-actions { display: flex; align-items: center; gap: 6px; }
+.modal-close, .modal-winbtn {
+  width: 28px; height: 28px; border: none; background: transparent; border-radius: 6px;
+  cursor: pointer; color: var(--text-3); font-size: 18px; line-height: 1;
+}
+.modal-winbtn { font-size: 13px; }
+.modal-close:hover, .modal-winbtn:hover { background: #f0f1f5; color: var(--text-1); }
 .modal-body { padding: 4px 24px 20px; }
 .modal-footer { padding: 14px 24px 20px; display: flex; justify-content: flex-end; gap: 10px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
@@ -338,6 +344,39 @@ table.table { width: 100%; border-collapse: collapse; }
 
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes popIn { from { opacity: 0; transform: translateY(12px) scale(0.97); } to { opacity: 1; transform: none; } }
+
+/* ---- 窗口化弹窗（终端弹窗）：拖拽移动 / 拖角缩放 / 最小化到右下角 / 最大化还原 ---- */
+.modal-windowed {
+  display: flex; flex-direction: column; overflow: hidden; max-height: calc(100vh - 24px);
+}
+.modal-windowed .modal-header { cursor: move; user-select: none; }
+.modal-windowed .modal-body {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding-bottom: 12px;
+}
+.modal-windowed .term-shell { flex: 1 1 auto; min-height: 0; }
+.modal-windowed.positioned, .modal.maximized { position: fixed; margin: 0; }
+.modal.maximized {
+  left: 0 !important; top: 0 !important; width: 100% !important; height: 100% !important;
+  max-width: none !important; max-height: none !important; border-radius: 0;
+}
+.modal-resize {
+  position: absolute; right: 2px; bottom: 2px; width: 18px; height: 18px; cursor: se-resize; z-index: 5;
+}
+.modal-resize::after {
+  content: ''; position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px;
+  border-right: 2px solid #c9cdd4; border-bottom: 2px solid #c9cdd4; border-radius: 0 0 3px 0;
+}
+.modal-resize:hover::after { border-color: var(--primary); }
+.modal-overlay.minimized { display: none; }
+.modal-min-chip {
+  position: fixed; right: 18px; bottom: 18px; z-index: 2100;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 18px; border-radius: 10px; border: 1px solid var(--border);
+  background: #fff; box-shadow: var(--shadow-pop); cursor: pointer;
+  font-size: 13px; color: var(--text-1); animation: popIn 0.2s ease;
+}
+.modal-min-chip:hover { color: var(--primary); border-color: var(--primary); }
+.modal-min-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
 
 #toast-root { position: fixed; top: 22px; left: 50%; transform: translateX(-50%); z-index: 2000; display: flex; flex-direction: column; gap: 10px; align-items: center; }
 .toast {
@@ -374,11 +413,12 @@ table.table { width: 100%; border-collapse: collapse; }
 .input:not(textarea), .select, .btn-sm, .toolbar .input, .toolbar .select { height: 32px; border-radius: 6px; }
 
 /* ---- 浏览器内 SSH 终端 ---- */
-.term-shell { display: flex; flex-direction: column; gap: 8px; }
+.term-shell { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .term-status { font-size: 12px; color: #8a8f98; padding: 2px 4px; }
 .term-status.err { color: #f5222d; }
 .term-box {
-  height: 440px;
+  flex: 1 1 auto;
+  min-height: 180px;
   background: #1e1e2e;
   border-radius: 8px;
   /* 底部留 16px 呼吸空间：圆角(8px)+overflow:hidden 会把贴底的最后一行/光标裁掉 */

@@ -158,24 +158,73 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
   };
 
   /* ---- Modal ---- */
-  MEVPS.modal = function ({ title, content, okText = '确 定', cancelText = '取 消', onOk, onClose, hideFooter = false, width }) {
+  /* windowed: true 时启用窗口化能力——标题栏最小化/最大化按钮（× 左侧）、
+   * 拖拽标题栏移动位置、右下角拖角缩放；最小化后收起到浏览器右下角浮标。*/
+  MEVPS.modal = function ({ title, content, okText = '确 定', cancelText = '取 消', onOk, onClose, hideFooter = false, width, height, windowed = false }) {
     const root = document.getElementById('modal-root');
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
+    const sizeStyle = [width ? `width:${width}px` : '', height ? `height:${height}px` : ''].filter(Boolean).join(';');
     overlay.innerHTML = `
-      <div class="modal" ${width ? `style="width:${width}px"` : ''}>
+      <div class="modal${windowed ? ' modal-windowed' : ''}" ${sizeStyle ? `style="${sizeStyle}"` : ''}>
         <div class="modal-header">
-          <span>${MEVPS.esc(title)}</span>
-          <button class="modal-close" data-act="close">×</button>
+          <span class="modal-title">${MEVPS.esc(title)}</span>
+          <div class="modal-actions">
+            ${windowed ? `<button class="modal-winbtn" data-win="min" title="最小化（收起到右下角）">—</button>
+              <button class="modal-winbtn" data-win="max" title="最大化 / 还原">▢</button>` : ''}
+            <button class="modal-close" data-act="close" title="关闭">×</button>
+          </div>
         </div>
         <div class="modal-body">${content}</div>
         ${hideFooter ? '' : `<div class="modal-footer"><button class="btn" data-act="close">${cancelText}</button><button class="btn btn-primary" data-act="ok">${okText}</button></div>`}
       </div>`;
     root.appendChild(overlay);
 
-    const close = () => { if (onClose) onClose(); overlay.remove(); };
+    const modalEl = overlay.querySelector('.modal');
+    let minChip = null;
+
+    const close = () => {
+      if (onClose) onClose();
+      overlay.remove();
+      if (minChip) { minChip.remove(); minChip = null; }
+    };
+
+    /* 最小化：隐藏弹窗，在浏览器右下角放一个可点击还原的浮标 */
+    const setMinimized = (on) => {
+      overlay.classList.toggle('minimized', on);
+      if (on && !minChip) {
+        minChip = document.createElement('button');
+        minChip.type = 'button';
+        minChip.className = 'modal-min-chip';
+        minChip.innerHTML = `<span class="dot"></span><span>${MEVPS.esc(title)}</span>`;
+        minChip.title = '点击还原窗口';
+        minChip.addEventListener('click', () => setMinimized(false));
+        document.body.appendChild(minChip);
+      } else if (!on && minChip) {
+        minChip.remove();
+        minChip = null;
+      }
+    };
+
+    /* 最大化 / 还原 二态切换 */
+    const setMaximized = (on) => {
+      modalEl.classList.toggle('maximized', on);
+      const btn = overlay.querySelector('[data-win="max"]');
+      if (btn) {
+        btn.textContent = on ? '❐' : '▢';
+        btn.title = on ? '还原' : '最大化 / 还原';
+      }
+    };
+
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) close();
+      const win = e.target.closest('[data-win]');
+      if (win) {
+        e.stopPropagation();
+        if (win.dataset.win === 'min') setMinimized(true);
+        else setMaximized(!modalEl.classList.contains('maximized'));
+        return;
+      }
       const act = e.target.closest('[data-act]');
       if (!act) return;
       if (act.dataset.act === 'close') close();
@@ -184,8 +233,70 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
         if (keep !== false) close();
       }
     });
+
+    if (windowed) enableWindowOps(modalEl);
     return { close, overlay };
   };
+
+  /* ---- 窗口化弹窗：拖拽标题栏移动 + 右下角拖角缩放 ---- */
+  function enableWindowOps(modalEl) {
+    const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
+    /* 首次拖动/缩放时从居中布局转为固定定位，之后用 left/top 控制 */
+    const toPositioned = () => {
+      if (modalEl.classList.contains('positioned')) return;
+      const r = modalEl.getBoundingClientRect();
+      modalEl.classList.add('positioned');
+      modalEl.style.left = r.left + 'px';
+      modalEl.style.top = r.top + 'px';
+      modalEl.style.width = r.width + 'px';
+      modalEl.style.height = r.height + 'px';
+    };
+
+    const header = modalEl.querySelector('.modal-header');
+    header.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.target.closest('button')) return; // 按钮区不触发拖拽
+      if (modalEl.classList.contains('maximized')) return; // 最大化时不拖动（先点还原）
+      e.preventDefault();
+      toPositioned();
+      const r = modalEl.getBoundingClientRect();
+      const ox = e.clientX - r.left, oy = e.clientY - r.top;
+      const move = (ev) => {
+        // 约束在视口内（允许拖出一部分，但始终留出可抓回的边）
+        modalEl.style.left = clamp(ev.clientX - ox, 120 - r.width, window.innerWidth - 120) + 'px';
+        modalEl.style.top = clamp(ev.clientY - oy, 0, window.innerHeight - 48) + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+
+    const handle = document.createElement('div');
+    handle.className = 'modal-resize';
+    handle.title = '拖拽缩放窗口';
+    modalEl.appendChild(handle);
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (modalEl.classList.contains('maximized')) return; // 最大化时不缩放
+      e.preventDefault();
+      e.stopPropagation();
+      toPositioned();
+      const r = modalEl.getBoundingClientRect();
+      const sx = e.clientX, sy = e.clientY;
+      const move = (ev) => {
+        modalEl.style.width = clamp(r.width + ev.clientX - sx, 360, window.innerWidth - 16) + 'px';
+        modalEl.style.height = clamp(r.height + ev.clientY - sy, 260, window.innerHeight - 16) + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+  }
 
   /* ---- 确认框 ---- */
   MEVPS.confirm = function (message, title = '提示') {
@@ -764,13 +875,14 @@ Views.vps = {
     const title = `SSH 终端 · ${item.name}（${item.ssh_host}:${item.ssh_port}）`;
     const content = `
       <div class="term-shell">
-        <div class="term-status" id="term-status">连接中…</div>
         <div class="term-box" id="term-host"></div>
+        <div class="term-status" id="term-status">连接中…</div>
       </div>`;
 
     let ws = null;
     let term = null;
     let fit = null;
+    let ro = null;
     let disposed = false;
     const statusEl = (msg, isErr) => {
       const el = document.getElementById('term-status');
@@ -783,6 +895,7 @@ Views.vps = {
       if (disposed) return;
       disposed = true;
       window.removeEventListener('resize', onWinResize);
+      try { if (ro) { ro.disconnect(); ro = null; } } catch (e) { /* ignore */ }
       try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) { /* ignore */ }
       try { if (term) term.dispose(); } catch (e) { /* ignore */ }
     };
@@ -797,7 +910,7 @@ Views.vps = {
     };
     const onWinResize = () => fitSafe();
 
-    MEVPS.modal({ title, content, hideFooter: true, width: 860, onClose: cleanup });
+    MEVPS.modal({ title, content, hideFooter: true, width: 860, height: 560, windowed: true, onClose: cleanup });
 
     term = new Terminal({
       fontSize: 13,
@@ -810,6 +923,11 @@ Views.vps = {
     term.loadAddon(fit);
     term.open(document.getElementById('term-host'));
     fitSafe();
+    /* 弹窗尺寸变化（最大化/还原/拖角缩放）时自动重排行列（fitSafe 已含底部让行） */
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => fitSafe());
+      ro.observe(document.getElementById('term-host'));
+    }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/api/vps/${item.id}/terminal?ticket=${encodeURIComponent(ticket)}`);

@@ -302,13 +302,14 @@ Views.vps = {
     const title = `SSH 终端 · ${item.name}（${item.ssh_host}:${item.ssh_port}）`;
     const content = `
       <div class="term-shell">
-        <div class="term-status" id="term-status">连接中…</div>
         <div class="term-box" id="term-host"></div>
+        <div class="term-status" id="term-status">连接中…</div>
       </div>`;
 
     let ws = null;
     let term = null;
     let fit = null;
+    let ro = null;
     let disposed = false;
     const statusEl = (msg, isErr) => {
       const el = document.getElementById('term-status');
@@ -321,6 +322,7 @@ Views.vps = {
       if (disposed) return;
       disposed = true;
       window.removeEventListener('resize', onWinResize);
+      try { if (ro) { ro.disconnect(); ro = null; } } catch (e) { /* ignore */ }
       try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) { /* ignore */ }
       try { if (term) term.dispose(); } catch (e) { /* ignore */ }
     };
@@ -335,7 +337,7 @@ Views.vps = {
     };
     const onWinResize = () => fitSafe();
 
-    MEVPS.modal({ title, content, hideFooter: true, width: 860, onClose: cleanup });
+    MEVPS.modal({ title, content, hideFooter: true, width: 860, height: 560, windowed: true, onClose: cleanup });
 
     term = new Terminal({
       fontSize: 13,
@@ -348,6 +350,11 @@ Views.vps = {
     term.loadAddon(fit);
     term.open(document.getElementById('term-host'));
     fitSafe();
+    /* 弹窗尺寸变化（最大化/还原/拖角缩放）时自动重排行列（fitSafe 已含底部让行） */
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => fitSafe());
+      ro.observe(document.getElementById('term-host'));
+    }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/api/vps/${item.id}/terminal?ticket=${encodeURIComponent(ticket)}`);
