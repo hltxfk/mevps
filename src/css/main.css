@@ -290,7 +290,24 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .toolbar .input, .toolbar .select { width: 200px; height: 34px; }
 .toolbar .spacer { flex: 1; }
 
-.table-wrap { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 320px); min-height: 280px; border-radius: var(--radius); }
+.table-wrap { overflow-x: auto; overflow-y: auto; border-radius: var(--radius); }
+/* 表格卡片填满内容区：仅当卡片是内容区唯一子元素时（VPS 管理/操作日志），
+   卡片撑满高度（只留 12px 内容边距），card-body/表格区撑满，分页贴底 */
+.content > .card:only-child {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.content > .card:only-child > .card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.content > .card:only-child .table-wrap {
+  flex: 1;
+  min-height: 0;
+}
 .table thead th { position: sticky; top: 0; z-index: 2; }
 table.table { width: 100%; border-collapse: separate; border-spacing: 0; }
 .table th {
