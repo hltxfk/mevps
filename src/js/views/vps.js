@@ -324,9 +324,16 @@ Views.vps = {
       try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) { /* ignore */ }
       try { if (term) term.dispose(); } catch (e) { /* ignore */ }
     };
-    const onWinResize = () => {
-      try { fit && fit.fit(); } catch (e) { /* ignore */ }
+    /* 尺寸自适应：先按容器算出 cols/rows，再主动让出一行——
+     * 保证终端内容下方永远有一整行空白，最后一行提示符/光标
+     * 不会贴着圆角边框被裁掉（fit 行高取整会吃掉半行） */
+    const fitSafe = () => {
+      try {
+        fit && fit.fit();
+        if (term && term.rows > 2) term.resize(term.cols, term.rows - 1);
+      } catch (e) { /* ignore */ }
     };
+    const onWinResize = () => fitSafe();
 
     MEVPS.modal({ title, content, hideFooter: true, width: 860, onClose: cleanup });
 
@@ -340,7 +347,7 @@ Views.vps = {
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(document.getElementById('term-host'));
-    try { fit.fit(); } catch (e) { /* ignore */ }
+    fitSafe();
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/api/vps/${item.id}/terminal?ticket=${encodeURIComponent(ticket)}`);
