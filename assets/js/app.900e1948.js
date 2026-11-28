@@ -220,6 +220,7 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
 
   /* ---- 分页 ---- */
   MEVPS.pager = function (el, { page, pageSize, total, onChange }) {
+    if (!el) return; // 分页容器已被切走/重渲染（异步返回后视图已切换），安全退出
     const pages = Math.max(1, Math.ceil(total / pageSize));
     const nums = [];
     const add = (p) => nums.push(`<button class="page-btn ${p === page ? 'active' : ''}" data-page="${p}">${p}</button>`);
@@ -255,6 +256,7 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
    * data: [{ date: 'MM-DD', cost: number }]
    */
   MEVPS.chartTrend = function (el, data, { color = '#646cff', valueKey = 'cost', prefix = '\u00a5' } = {}) {
+    if (!el) return; // 容器已被切走/重渲染，安全退出
     if (!data || !data.length) {
       el.innerHTML = '<div class="empty">暂无数据</div>';
       return;
@@ -309,6 +311,7 @@ MEVPS.icon = (name, size = 16, stroke = 2) =>
    * data: [{ label, count, color }]
    */
   MEVPS.chartDonut = function (el, data) {
+    if (!el) return; // 容器已被切走/重渲染，安全退出
     const total = data.reduce((s, d) => s + d.count, 0);
     if (!total) {
       el.innerHTML = '<div class="empty">暂无数据</div>';
@@ -383,6 +386,19 @@ Views.dashboard = {
         </div>
       </div>`;
 
+    // 捕获本次渲染的节点引用。await 期间若视图被切换 / 重渲染（打开或刷新后马上点
+    // 侧边栏、会话过期重登等），这些节点会随 innerHTML 重写而脱离 DOM；
+    // 之后必须先确认 isConnected 再写入，否则 querySelector 返回 null，
+    // "null.innerHTML" 会把 TypeError 抛回 route() 并把错误文本渲染进页面。
+    const els = {
+      statCards: container.querySelector('#stat-cards'),
+      chartTrend: container.querySelector('#chart-trend'),
+      chartDonut: container.querySelector('#chart-donut'),
+      recentLogs: container.querySelector('#recent-logs'),
+      sysInfo: container.querySelector('#sys-info'),
+    };
+    const alive = () => !!(els.statCards && els.statCards.isConnected);
+
     let s;
     try {
       s = await MEVPS.api('/stats');
@@ -390,6 +406,7 @@ Views.dashboard = {
       MEVPS.toast(e.message, 'error');
       return;
     }
+    if (!alive()) return; // 视图已被替换，丢弃本次过期结果
 
     const cards = [
       { label: 'VPS 总数', value: s.total, sub: '全部在册服务器', icon: 'server', cls: 'green' },
@@ -397,7 +414,7 @@ Views.dashboard = {
       { label: '离线 / 未检测', value: s.offline + s.unknown, sub: `离线 ${s.offline} · 未检测 ${s.unknown}`, icon: 'stop', cls: 'orange' },
       { label: '已同步', value: (s.dist || []).filter((d) => d.status === 'ok').reduce((a, b) => a + b.count, 0), sub: '配置 / 归属地已回填', icon: 'check', cls: 'purple' },
     ];
-    MEVPS.$('#stat-cards').innerHTML = cards
+    els.statCards.innerHTML = cards
       .map(
         (c) => `<div class="stat-card">
           <div class="stat-icon ${c.cls}">${MEVPS.icon(c.icon, 24)}</div>
@@ -410,17 +427,17 @@ Views.dashboard = {
       )
       .join('');
 
-    MEVPS.chartTrend(MEVPS.$('#chart-trend'), s.trend, { valueKey: 'count', prefix: '' });
+    MEVPS.chartTrend(els.chartTrend, s.trend, { valueKey: 'count', prefix: '' });
 
     const colorMap = { ok: '#52c41a', running: '#646cff', pending: '#faad14', error: '#f5222d', idle: '#999999' };
     const nameMap = { ok: '已同步', running: '同步中', pending: '待同步', error: '同步失败', idle: '未同步' };
     MEVPS.chartDonut(
-      MEVPS.$('#chart-donut'),
+      els.chartDonut,
       (s.dist || []).map((d) => ({ label: nameMap[d.status] || d.status, count: d.count, color: colorMap[d.status] || '#646cff' }))
     );
 
     const tagMap = { 登录: 'tag-success', 新增: 'tag-info', 修改: 'tag-warning', 删除: 'tag-error', 登出: 'tag-default', 初始化: 'tag-default', 启动: 'tag-success', 停止: 'tag-default', 重启: 'tag-warning', 设置: 'tag-info', 同步: 'tag-info' };
-    MEVPS.$('#recent-logs').innerHTML =
+    els.recentLogs.innerHTML =
       (s.recentLogs || []).map((l) => `
         <div class="log-item">
           <span class="tag ${tagMap[l.action] || 'tag-default'} log-action">${MEVPS.esc(l.action)}</span>
@@ -431,7 +448,7 @@ Views.dashboard = {
     const needRows = (s.needSync || [])
       .map((v) => `<div class="info-row"><span class="k">${MEVPS.esc(v.name)}</span><span class="v">${MEVPS.esc(v.sync_status === 'error' ? (v.sync_error || '同步失败') : v.sync_status)}</span></div>`)
       .join('');
-    MEVPS.$('#sys-info').innerHTML = `
+    els.sysInfo.innerHTML = `
       <div class="info-row"><span class="k">站点名称</span><span class="v">${MEVPS.esc(s.siteName)}</span></div>
       <div class="info-row"><span class="k">系统版本</span><span class="v">v${MEVPS.esc(s.version)}</span></div>
       <div class="info-row"><span class="k">运行平台</span><span class="v">Cloudflare Workers</span></div>
@@ -1103,6 +1120,13 @@ Views.settings = {
         </div>
       </div>`;
 
+    // 捕获本次渲染的节点引用，await 之后先验证还挂在 DOM 上再写入（防异步竞态）
+    const nameEl = container.querySelector('#s-name');
+    const descEl = container.querySelector('#s-desc');
+    const sessionEl = container.querySelector('#s-session');
+    const initAtEl = container.querySelector('#s-init-at');
+    const usernameEl = container.querySelector('#p-username');
+
     let s;
     try {
       s = await MEVPS.api('/settings');
@@ -1110,11 +1134,12 @@ Views.settings = {
       MEVPS.toast(e.message, 'error');
       return;
     }
-    MEVPS.$('#s-name').value = s.site_name;
-    MEVPS.$('#s-desc').value = s.site_desc;
-    MEVPS.$('#s-session').value = s.session_hours;
-    MEVPS.$('#s-init-at').textContent = s.init_at || '-';
-    MEVPS.$('#p-username').value = MEVPS.savedUser() || 'admin';
+    if (!nameEl || !nameEl.isConnected) return; // 视图已被替换，丢弃本次过期结果
+    nameEl.value = s.site_name;
+    descEl.value = s.site_desc;
+    sessionEl.value = s.session_hours;
+    initAtEl.textContent = s.init_at || '-';
+    usernameEl.value = MEVPS.savedUser() || 'admin';
 
     MEVPS.$('#s-save').addEventListener('click', async () => {
       try {
@@ -1274,6 +1299,8 @@ Views.settings = {
   }
 
   /* ---------------- 路由 ---------------- */
+  let routeSeq = 0; // 路由世代号：每次 route() 自增，过期路由禁止再写 DOM
+
   function currentKey() {
     const key = (location.hash || '#/dashboard').replace(/^#\//, '').split('?')[0];
     return MENU.includes(key) ? key : 'dashboard';
@@ -1281,6 +1308,7 @@ Views.settings = {
 
   async function route() {
     if (!MEVPS.getToken()) return showLogin();
+    const seq = ++routeSeq;
     const key = currentKey();
     openTab(key);
     renderMenu(key);
@@ -1292,8 +1320,12 @@ Views.settings = {
     try {
       await Views[key].render(container);
     } catch (e) {
+      // 若期间已有新路由接管视图，不得把错误文本写进去覆盖新视图
+      if (seq !== routeSeq) return;
       container.innerHTML = `<div class="empty">${MEVPS.esc(e.message || '加载失败')}</div>`;
+      return;
     }
+    if (seq !== routeSeq) return; // 过期路由：新视图已接管，丢弃收尾动作
     container.scrollTop = 0;
   }
 
@@ -1359,7 +1391,11 @@ Views.settings = {
     // 避免刷新时闪现登录框；会话校验放后台静默进行，
     // 若已过期，api.js 的 401 → mevps:unauthorized 会自动跳回登录页。
     showLayout();
-    if (!location.hash) location.hash = '#/dashboard';
+    if (!location.hash) {
+      // 用 replaceState 而非 location.hash 赋值：后者会额外触发一次 hashchange，
+      // 导致 route() 在首屏并发跑两遍（双渲染 + 双 /stats 请求 + 双错误 toast）
+      history.replaceState(null, '', '#/dashboard');
+    }
     route();
     MEVPS.api('/me')
       .then((me) => MEVPS.setToken(MEVPS.getToken(), me.username))

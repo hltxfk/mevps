@@ -111,6 +111,8 @@
   }
 
   /* ---------------- 路由 ---------------- */
+  let routeSeq = 0; // 路由世代号：每次 route() 自增，过期路由禁止再写 DOM
+
   function currentKey() {
     const key = (location.hash || '#/dashboard').replace(/^#\//, '').split('?')[0];
     return MENU.includes(key) ? key : 'dashboard';
@@ -118,6 +120,7 @@
 
   async function route() {
     if (!MEVPS.getToken()) return showLogin();
+    const seq = ++routeSeq;
     const key = currentKey();
     openTab(key);
     renderMenu(key);
@@ -129,8 +132,12 @@
     try {
       await Views[key].render(container);
     } catch (e) {
+      // 若期间已有新路由接管视图，不得把错误文本写进去覆盖新视图
+      if (seq !== routeSeq) return;
       container.innerHTML = `<div class="empty">${MEVPS.esc(e.message || '加载失败')}</div>`;
+      return;
     }
+    if (seq !== routeSeq) return; // 过期路由：新视图已接管，丢弃收尾动作
     container.scrollTop = 0;
   }
 
@@ -196,7 +203,11 @@
     // 避免刷新时闪现登录框；会话校验放后台静默进行，
     // 若已过期，api.js 的 401 → mevps:unauthorized 会自动跳回登录页。
     showLayout();
-    if (!location.hash) location.hash = '#/dashboard';
+    if (!location.hash) {
+      // 用 replaceState 而非 location.hash 赋值：后者会额外触发一次 hashchange，
+      // 导致 route() 在首屏并发跑两遍（双渲染 + 双 /stats 请求 + 双错误 toast）
+      history.replaceState(null, '', '#/dashboard');
+    }
     route();
     MEVPS.api('/me')
       .then((me) => MEVPS.setToken(MEVPS.getToken(), me.username))

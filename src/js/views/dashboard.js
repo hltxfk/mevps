@@ -30,6 +30,19 @@ Views.dashboard = {
         </div>
       </div>`;
 
+    // 捕获本次渲染的节点引用。await 期间若视图被切换 / 重渲染（打开或刷新后马上点
+    // 侧边栏、会话过期重登等），这些节点会随 innerHTML 重写而脱离 DOM；
+    // 之后必须先确认 isConnected 再写入，否则 querySelector 返回 null，
+    // "null.innerHTML" 会把 TypeError 抛回 route() 并把错误文本渲染进页面。
+    const els = {
+      statCards: container.querySelector('#stat-cards'),
+      chartTrend: container.querySelector('#chart-trend'),
+      chartDonut: container.querySelector('#chart-donut'),
+      recentLogs: container.querySelector('#recent-logs'),
+      sysInfo: container.querySelector('#sys-info'),
+    };
+    const alive = () => !!(els.statCards && els.statCards.isConnected);
+
     let s;
     try {
       s = await MEVPS.api('/stats');
@@ -37,6 +50,7 @@ Views.dashboard = {
       MEVPS.toast(e.message, 'error');
       return;
     }
+    if (!alive()) return; // 视图已被替换，丢弃本次过期结果
 
     const cards = [
       { label: 'VPS 总数', value: s.total, sub: '全部在册服务器', icon: 'server', cls: 'green' },
@@ -44,7 +58,7 @@ Views.dashboard = {
       { label: '离线 / 未检测', value: s.offline + s.unknown, sub: `离线 ${s.offline} · 未检测 ${s.unknown}`, icon: 'stop', cls: 'orange' },
       { label: '已同步', value: (s.dist || []).filter((d) => d.status === 'ok').reduce((a, b) => a + b.count, 0), sub: '配置 / 归属地已回填', icon: 'check', cls: 'purple' },
     ];
-    MEVPS.$('#stat-cards').innerHTML = cards
+    els.statCards.innerHTML = cards
       .map(
         (c) => `<div class="stat-card">
           <div class="stat-icon ${c.cls}">${MEVPS.icon(c.icon, 24)}</div>
@@ -57,17 +71,17 @@ Views.dashboard = {
       )
       .join('');
 
-    MEVPS.chartTrend(MEVPS.$('#chart-trend'), s.trend, { valueKey: 'count', prefix: '' });
+    MEVPS.chartTrend(els.chartTrend, s.trend, { valueKey: 'count', prefix: '' });
 
     const colorMap = { ok: '#52c41a', running: '#646cff', pending: '#faad14', error: '#f5222d', idle: '#999999' };
     const nameMap = { ok: '已同步', running: '同步中', pending: '待同步', error: '同步失败', idle: '未同步' };
     MEVPS.chartDonut(
-      MEVPS.$('#chart-donut'),
+      els.chartDonut,
       (s.dist || []).map((d) => ({ label: nameMap[d.status] || d.status, count: d.count, color: colorMap[d.status] || '#646cff' }))
     );
 
     const tagMap = { 登录: 'tag-success', 新增: 'tag-info', 修改: 'tag-warning', 删除: 'tag-error', 登出: 'tag-default', 初始化: 'tag-default', 启动: 'tag-success', 停止: 'tag-default', 重启: 'tag-warning', 设置: 'tag-info', 同步: 'tag-info' };
-    MEVPS.$('#recent-logs').innerHTML =
+    els.recentLogs.innerHTML =
       (s.recentLogs || []).map((l) => `
         <div class="log-item">
           <span class="tag ${tagMap[l.action] || 'tag-default'} log-action">${MEVPS.esc(l.action)}</span>
@@ -78,7 +92,7 @@ Views.dashboard = {
     const needRows = (s.needSync || [])
       .map((v) => `<div class="info-row"><span class="k">${MEVPS.esc(v.name)}</span><span class="v">${MEVPS.esc(v.sync_status === 'error' ? (v.sync_error || '同步失败') : v.sync_status)}</span></div>`)
       .join('');
-    MEVPS.$('#sys-info').innerHTML = `
+    els.sysInfo.innerHTML = `
       <div class="info-row"><span class="k">站点名称</span><span class="v">${MEVPS.esc(s.siteName)}</span></div>
       <div class="info-row"><span class="k">系统版本</span><span class="v">v${MEVPS.esc(s.version)}</span></div>
       <div class="info-row"><span class="k">运行平台</span><span class="v">Cloudflare Workers</span></div>

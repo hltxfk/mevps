@@ -77,6 +77,7 @@
 
   /* ---- 分页 ---- */
   MEVPS.pager = function (el, { page, pageSize, total, onChange }) {
+    if (!el) return; // 分页容器已被切走/重渲染（异步返回后视图已切换），安全退出
     const pages = Math.max(1, Math.ceil(total / pageSize));
     const nums = [];
     const add = (p) => nums.push(`<button class="page-btn ${p === page ? 'active' : ''}" data-page="${p}">${p}</button>`);

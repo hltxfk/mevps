@@ -58,6 +58,13 @@ Views.settings = {
         </div>
       </div>`;
 
+    // 捕获本次渲染的节点引用，await 之后先验证还挂在 DOM 上再写入（防异步竞态）
+    const nameEl = container.querySelector('#s-name');
+    const descEl = container.querySelector('#s-desc');
+    const sessionEl = container.querySelector('#s-session');
+    const initAtEl = container.querySelector('#s-init-at');
+    const usernameEl = container.querySelector('#p-username');
+
     let s;
     try {
       s = await MEVPS.api('/settings');
@@ -65,11 +72,12 @@ Views.settings = {
       MEVPS.toast(e.message, 'error');
       return;
     }
-    MEVPS.$('#s-name').value = s.site_name;
-    MEVPS.$('#s-desc').value = s.site_desc;
-    MEVPS.$('#s-session').value = s.session_hours;
-    MEVPS.$('#s-init-at').textContent = s.init_at || '-';
-    MEVPS.$('#p-username').value = MEVPS.savedUser() || 'admin';
+    if (!nameEl || !nameEl.isConnected) return; // 视图已被替换，丢弃本次过期结果
+    nameEl.value = s.site_name;
+    descEl.value = s.site_desc;
+    sessionEl.value = s.session_hours;
+    initAtEl.textContent = s.init_at || '-';
+    usernameEl.value = MEVPS.savedUser() || 'admin';
 
     MEVPS.$('#s-save').addEventListener('click', async () => {
       try {

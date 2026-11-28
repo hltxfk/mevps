@@ -5,6 +5,7 @@
    * data: [{ date: 'MM-DD', cost: number }]
    */
   MEVPS.chartTrend = function (el, data, { color = '#646cff', valueKey = 'cost', prefix = '\u00a5' } = {}) {
+    if (!el) return; // 容器已被切走/重渲染，安全退出
     if (!data || !data.length) {
       el.innerHTML = '<div class="empty">暂无数据</div>';
       return;
@@ -59,6 +60,7 @@
    * data: [{ label, count, color }]
    */
   MEVPS.chartDonut = function (el, data) {
+    if (!el) return; // 容器已被切走/重渲染，安全退出
     const total = data.reduce((s, d) => s + d.count, 0);
     if (!total) {
       el.innerHTML = '<div class="empty">暂无数据</div>';
