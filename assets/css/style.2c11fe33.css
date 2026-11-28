@@ -244,7 +244,7 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 /* 顶层模块间的纵向间距（不作用于网格内并排的卡片） */
 .content > * + * { margin-top: 16px; }
 .card-header { padding: 16px 20px; font-size: 15px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
-.card-body { padding: 0 20px 20px; }
+.card-body { padding: 16px 12px 12px; }
 .card-body.no-pad { padding: 0; }
 
 /* ---------------- 仪表盘 ---------------- */
