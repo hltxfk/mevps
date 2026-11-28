@@ -381,7 +381,8 @@ table.table { width: 100%; border-collapse: collapse; }
   height: 440px;
   background: #1e1e2e;
   border-radius: 8px;
-  padding: 8px 4px 4px 8px;
+  /* 底部留 16px 呼吸空间：圆角(8px)+overflow:hidden 会把贴底的最后一行/光标裁掉 */
+  padding: 8px 8px 16px 8px;
   overflow: hidden;
 }
 .term-box .xterm { height: 100%; }
