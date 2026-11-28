@@ -10,7 +10,7 @@ Views.vps = {
     const st = this.state;
     container.innerHTML = `
       <div class="card">
-        <div class="card-body" style="padding-top:20px">
+        <div class="card-body">
           <div class="toolbar">
             <div class="input-wrap"><span class="input-icon">${MEVPS.icon('search', 15)}</span>
               <input class="input" id="vps-keyword" placeholder="搜索名称 / IP / 地区" value="${MEVPS.esc(st.keyword)}" style="padding-left:34px" /></div>
