@@ -290,7 +290,8 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .toolbar .input, .toolbar .select { width: 200px; height: 34px; }
 .toolbar .spacer { flex: 1; }
 
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 320px); min-height: 280px; border-radius: var(--radius); }
+.table thead th { position: sticky; top: 0; z-index: 2; }
 table.table { width: 100%; border-collapse: separate; border-spacing: 0; }
 .table th {
   background: #fafafa; font-size: 13px; font-weight: 600; color: var(--text-2);
