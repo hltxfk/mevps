@@ -1523,7 +1523,8 @@ function sealForGitHub(pk, msg) {
  *   KEX：       curve25519-sha256、ecdh-sha2-nistp256
  *   加密：      aes128-gcm@openssh.com、aes256-gcm@openssh.com（AEAD，无独立 MAC）
  *   主机密钥：  ssh-ed25519 / ecdsa-sha2-nistp256 / rsa-sha2-512 / rsa-sha2-256 / ssh-rsa（全部验签）
- *   认证：      password / publickey（OpenSSH 私钥格式 ed25519/rsa/ecdsa；PEM PKCS#1/PKCS#8 RSA）
+ *   认证：      password / publickey（OpenSSH 私钥格式 ed25519/rsa/ecdsa；PEM PKCS#1/PKCS#8 RSA）；
+ *             password 被服务器禁用时自动降级 keyboard-interactive（RFC 4256，密码回答交互提示）
  *   严格 KEX：  kex-strict-c/s-v00@openssh.com（防 Terrapin 前缀截断攻击）
  *
  * 交互式会话：pty-req + shell + window-change，通道层带窗口流量控制。
@@ -1809,6 +1810,8 @@ const SSH = (() => {
     DISCONNECT: 1, IGNORE: 2, UNIMPLEMENTED: 3, DEBUG: 4, SERVICE_REQUEST: 5, SERVICE_ACCEPT: 6, EXT_INFO: 7,
     KEXINIT: 20, NEWKEYS: 21, KEX_ECDH_INIT: 30, KEX_ECDH_REPLY: 31,
     USERAUTH_REQUEST: 50, USERAUTH_FAILURE: 51, USERAUTH_SUCCESS: 52, USERAUTH_BANNER: 53, USERAUTH_PK_OK: 60,
+    /* RFC 4256 keyboard-interactive：INFO_REQUEST 与 PK_OK 同为 60（按在途认证方法区分），INFO_RESPONSE=61 */
+    USERAUTH_INFO_REQUEST: 60, USERAUTH_INFO_RESPONSE: 61,
     GLOBAL_REQUEST: 80, REQUEST_SUCCESS: 81, REQUEST_FAILURE: 82,
     CHANNEL_OPEN: 90, CHANNEL_OPEN_CONFIRMATION: 91, CHANNEL_OPEN_FAILURE: 92, CHANNEL_WINDOW_ADJUST: 93,
     CHANNEL_DATA: 94, CHANNEL_EXTENDED_DATA: 95, CHANNEL_EOF: 96, CHANNEL_CLOSE: 97, CHANNEL_REQUEST: 98,
@@ -2131,7 +2134,13 @@ const SSH = (() => {
       await this.waitMsg([MSG.SERVICE_ACCEPT], 30000);
 
       if (password) {
-        await this.authPassword(username, password);
+        try {
+          await this.authPassword(username, password);
+        } catch (e) {
+          /* 服务器禁用 password 方法（只留 publickey/keyboard-interactive 等）时自动降级 */
+          if (!String((e && e.message) || '').includes('keyboard-interactive')) throw e;
+          await this.authKeyboardInteractive(username, password);
+        }
       } else if (privateKey) {
         const key = await buildUserKey(privateKey);
         await this.authPublicKey(username, key);
@@ -2232,6 +2241,38 @@ const SSH = (() => {
         .u8(MSG.USERAUTH_REQUEST).str(username).str('ssh-connection').str('password')
         .bool(false).str(password).bytes());
       await this.expectAuthOk();
+    }
+
+    /* keyboard-interactive（RFC 4256）：服务器禁用 password 方法、只留
+     * publickey/keyboard-interactive 时（如 ct8.pl 系列），用已存密码回答交互提示。*/
+    async authKeyboardInteractive(username, password) {
+      await this.sendPacket(new Writer()
+        .u8(MSG.USERAUTH_REQUEST).str(username).str('ssh-connection').str('keyboard-interactive')
+        .str('').str('').bytes());
+      for (let round = 0; round < 8; round++) {
+        const msg = await this.waitMsg([MSG.USERAUTH_SUCCESS, MSG.USERAUTH_FAILURE, MSG.USERAUTH_INFO_REQUEST], 30000);
+        if (msg[0] === MSG.USERAUTH_SUCCESS) return;
+        if (msg[0] === MSG.USERAUTH_FAILURE) {
+          const r = new Reader(msg);
+          r.u8();
+          const methods = r.text();
+          const partial = r.bool();
+          throw new Error(partial ? '认证不完整，请继续认证' : `认证失败（服务器允许的方式：${methods || '无'}）`);
+        }
+        /* INFO_REQUEST: name, instruction, language, num_prompts, (prompt, echo)* */
+        const r = new Reader(msg);
+        r.u8();
+        r.text(); r.text(); r.text();
+        const n = r.u32();
+        const w = new Writer().u8(MSG.USERAUTH_INFO_RESPONSE).u32(n);
+        for (let i = 0; i < n; i++) {
+          r.text(); // 提示文本
+          const echo = r.bool();
+          w.str(echo ? '' : password); // 非回显提示（密码框）回密码；回显提示留空
+        }
+        await this.sendPacket(w.bytes());
+      }
+      throw new Error('keyboard-interactive 认证交互轮次过多');
     }
 
     async authPublicKey(username, key) {
