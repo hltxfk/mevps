@@ -203,7 +203,7 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .layout-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .header {
   height: 50px; background: #fff; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between; padding: 0 16px; flex-shrink: 0; position: relative; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between; padding: 0 12px; flex-shrink: 0; position: relative; z-index: 20;
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .header-right { display: flex; align-items: center; gap: 14px; }
@@ -223,7 +223,7 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 /* 多标签页（SoybeanAdmin 经典 TagsView） */
 .tabs-bar {
   height: 44px; background: #fff; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 6px; padding: 0 16px; overflow-x: auto; flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px; padding: 0 12px; overflow-x: auto; flex-shrink: 0;
 }
 .tabs-bar::-webkit-scrollbar { height: 0; }
 .tab-chip {
@@ -237,7 +237,7 @@ textarea.input { height: auto; padding: 8px 12px; resize: vertical; min-height: 
 .tab-chip .tab-close:hover { background: rgba(0, 0, 0, 0.08); color: var(--text-1); }
 .tab-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
-.content { flex: 1; overflow-y: auto; padding: 20px; }
+.content { flex: 1; overflow-y: auto; padding: 12px; }
 
 /* ---------------- 卡片 ---------------- */
 .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow-card); }
