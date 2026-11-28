@@ -1052,7 +1052,7 @@ Views.logs = {
     const st = this.state;
     container.innerHTML = `
       <div class="card">
-        <div class="card-body" style="padding-top:20px">
+        <div class="card-body">
           <div class="toolbar">
             <div class="input-wrap"><span class="input-icon">${MEVPS.icon('search', 15)}</span>
               <input class="input" id="log-keyword" placeholder="搜索操作人 / 目标 / 详情" value="${MEVPS.esc(st.keyword)}" style="padding-left:34px" /></div>
